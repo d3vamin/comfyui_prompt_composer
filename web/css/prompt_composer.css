@@ -1,0 +1,2379 @@
+/**
+ * prompt_composer.css
+ *
+ * Styling for the in-node Prompt Composer UI. Dark theme matching the
+ * agreed UI concept: toolbar on top, section list on the left, entry
+ * grid / edit panel on the right, assembled preview along the bottom.
+ */
+:root {
+    /* ==== Prompt Composer color system (round 44, syntax fixed 45) ====
+       Chromatic literals live HERE only, as role bases; every other
+       rule consumes a base or a DERIVED recipe -- color-mix() for
+       blends toward the mix anchors and for transparent washes.
+       Edit a base and its whole family follows: bg, border, hover,
+       wash, text. hsl(from ...) relative-color syntax is BANNED:
+       the ComfyUI Chromium does not resolve it (round 45 bug).
+       Exception by design: section/tag colors persist to the backend
+       as raw hex (preset_store truncates to 16 chars), so naming.js
+       keeps that palette and cards re-scope --accent inline; the four
+       per-section uses below read var(--accent, var(--pc-info)).
+       Functional black/white washes and shadows (the press/hover
+       paint doctrine) stay literal -- they are not theme colors. */
+
+    /* role bases */
+    --pc-info: #3a6fd9;
+    --pc-safe: #4caf50;
+    --pc-gold: #ffcb45;
+    --pc-warn: #e08a2e;
+    --pc-danger: #d44b4b;
+    --pc-seed: #895dd3;
+    --pc-tag: #3a6fd9;
+
+    /* mix anchors: every lighter/darker recipe blends the base with
+       these -- shift them (e.g. a warm highlight, a blue shadow) and
+       all lightness rungs follow. hsl(from ...) is BANNED: the
+       ComfyUI Chromium does not resolve it (round 45). */
+    --pc-highlight: #ffffff;
+    --pc-shadow: #000000;
+
+    /* info variations */
+    --pc-info-light: color-mix(in srgb, var(--pc-info) 79%, var(--pc-highlight));
+    --pc-info-deep: color-mix(in srgb, var(--pc-info) 93%, var(--pc-shadow));
+    --pc-info-pale: color-mix(in srgb, var(--pc-info) 25%, var(--pc-highlight));
+
+    /* safe variations */
+    --pc-safe-light: color-mix(in srgb, var(--pc-safe) 70%, var(--pc-highlight));
+    --pc-safe-pale: color-mix(in srgb, var(--pc-safe) 25%, var(--pc-highlight));
+    --pc-safe-deep: color-mix(in srgb, var(--pc-safe) 61%, var(--pc-shadow));
+    --pc-safe-line: color-mix(in srgb, var(--pc-safe) 88%, var(--pc-shadow));
+    --pc-safe-tint: color-mix(in srgb, var(--pc-safe) 25%, var(--pc-shadow));
+    
+    /* gold variations */
+    --pc-gold-line: color-mix(in srgb, var(--pc-gold) 52%, var(--pc-shadow));
+    --pc-gold-deep: color-mix(in srgb, var(--pc-gold) 88%, var(--pc-shadow));
+    --pc-gold-pale: color-mix(in srgb, var(--pc-gold-deep) 88%, var(--pc-highlight));
+    --pc-gold-ink: color-mix(in srgb, var(--pc-gold) 15%, var(--pc-shadow));
+    
+    /* warn variations */
+    --pc-warn-pale: color-mix(in srgb, var(--pc-warn) 79%, var(--pc-highlight));
+    --pc-warn-deep: color-mix(in srgb, var(--pc-warn) 88%, var(--pc-shadow));
+
+    /* danger variations */
+    --pc-danger-deep: color-mix(in srgb, var(--pc-danger) 52%, var(--pc-shadow));
+    --pc-danger-line: color-mix(in srgb, var(--pc-danger) 70%, var(--pc-shadow));
+    --pc-danger-pale: color-mix(in srgb, var(--pc-danger) 52%, var(--pc-highlight));
+
+    /* neutrals */
+    --pc-text: #d7d7d7;
+    --pc-text-dim: #999999;
+    --pc-text-input: #161616;
+    --pc-panel-light: color-mix(in srgb, var(--pc-panel) 98%, var(--pc-highlight));
+    --pc-panel: #252525;
+    --pc-panel-deep: #1a1a1a;
+    --pc-btn: #343434;
+    --pc-btn-hover: color-mix(in srgb, var(--pc-btn) 94%, var(--pc-highlight));
+    --pc-btn-border: #434343;
+}
+
+.pc-root {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    height: 100%;
+    background: var(--pc-panel-deep);
+    color: var(--pc-text);
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-size: 12px;
+    border-radius: 6px;
+    overflow: hidden;
+    box-sizing: border-box;
+}
+
+.pc-root * {
+    box-sizing: border-box;
+}
+
+/* ---------- Toolbar ---------- */
+
+.pc-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 4px;
+    background: var(--pc-panel);
+    flex: 0 0 auto;
+}
+
+.pc-preset-select {
+    flex: 1 1 auto;
+    background: var(--pc-btn-border);
+    color: var(--pc-text);
+    border: 1px solid var(--pc-btn-border);
+    border-radius: 4px;
+    padding: 4px 6px;
+    min-width: 0;
+}
+
+.pc-btn {
+    background: var(--pc-btn);
+    color: var(--pc-text);
+    border: 1px solid var(--pc-btn-border);
+    border-radius: 4px;
+    padding: 2px 4px 0px 4px;
+    cursor: pointer;
+    font-size: 12px;
+    line-height: 1.2;
+    white-space: nowrap;
+}
+
+.pc-btn svg,
+ .pc-icon-btn svg,
+ .pc-entry-image-delete svg,
+ .pc-entry-separator-btn svg {
+    display: block;
+}
+
+.pc-btn:hover {
+    background: var(--pc-btn-hover);
+    border-color: color-mix(in srgb, var(--pc-text-dim) 55%, var(--pc-shadow));
+}
+
+.pc-btn.pc-primary {
+    background: var(--pc-info);
+    border-color: var(--pc-info-light);
+    color: var(--pc-info-pale);
+}
+
+.pc-btn.pc-primary:hover {
+    background: var(--pc-info-light);
+}
+
+.pc-btn.pc-danger {
+    background: var(--pc-danger-deep);
+    border-color: var(--pc-danger-line);
+    color: var(--pc-danger-pale);
+}
+
+.pc-btn.pc-danger:hover {
+    background: var(--pc-danger-deep);
+}
+
+/* The preset toolbar's Save button, while the live composition differs
+   from what the selected preset has on disk. Green means "there is
+   something to save"; it goes back to the normal grey the moment the
+   preset is saved or reloaded. Deliberately a whole-background change
+   rather than a border or a glow: this button is one of five identical
+   grey icons in a row, and a subtle cue on one of them is easy to miss
+   exactly when it matters. */
+.pc-btn.pc-preset-save-dirty {
+    background: var(--pc-safe-deep);
+    border-color: var(--pc-safe-line);
+    color: var(--pc-safe-pale);
+}
+
+.pc-btn.pc-preset-save-dirty:hover {
+    background: var(--pc-safe-deep);
+    border-color: var(--pc-safe-line);
+}
+
+.pc-btn.pc-icon-only {
+    padding: 3px 3px 3px 3px;
+}
+
+.pc-btn.pc-end-separator-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 23px;
+    min-height: 23px;
+    padding: 0px 3px 0px 4px;
+    font-family: "SFMono-Regular", Consolas, monospace;
+    font-size: 20px;
+    line-height: 1;
+}
+
+/* Round 59: the section's end separator is SET (not "none") -- the
+ * button that manages it lights gold, exactly like the entry-end
+ * separator button on a card. Cycled back to none, it dims with the
+ * rest of the row's chrome. */
+.pc-btn.pc-end-separator-btn.pc-always-visible {
+    color: var(--pc-gold);
+}
+
+.pc-btn.pc-view-toggle {
+    background: var(--pc-info-deep);
+    border-color: var(--pc-info-light);
+    color: var(--pc-info-pale);
+}
+
+.pc-btn.pc-view-toggle:hover {
+    background: var(--pc-info-light);
+    border-color: var(--pc-info-light);
+}
+
+.pc-btn.pc-add-entry-btn {
+    background: var(--pc-safe-deep);
+    border-color: var(--pc-safe);
+    color: var(--pc-safe-pale);
+}
+
+.pc-btn.pc-add-entry-btn:hover {
+    background: var(--pc-safe);
+    border-color: var(--pc-safe-light);
+}
+
+.pc-btn:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+
+/* ---------- Unified control states (round 39; paint-only round 40) ----------
+   Everything built by ui_chrome.js (buttons, toggles, chips, swatches,
+   counters, search clears) carries .pc-pressable: ONE affordance
+   language for normal / hover / pressed / focus. Families keep their
+   own look; the lift is universal. Round 40: the lift is a background
+   WASH (inset box-shadow flood), never filter/transform -- those
+   promote composited layers, and Chromium answers by dropping LCD
+   subpixel text antialiasing across the overlap: hovering a chip
+   visibly "changed the brightness" of unrelated card text, and a
+   toggle press flickered the whole grid. Paint-only is flicker-proof.
+   999px spread = the wash covers any sane control size.
+   Round 42 adds the physical press STEP (1px down via relative
+   `top` -- layout, never transform, so no layer and no ghost).
+   Round 43: the opt-out is the FACTORY's noStep option, not a
+   hand-written :not() list -- the card's bottom-anchored
+   random/separator overlays got clobbered by `top` and tele-
+   ported to the card's top edge while pressed (absolute + top
+   + bottom = over-constrained: top wins). Every absolutely-
+   placed pressable now passes noStep. .pc-no-hover drops ONLY
+   the hover wash (row flag icons light with their row; overlay
+   stars and the search x have their own cues). */
+
+.pc-pressable {
+    position: relative;
+    transition: background-color 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease, color 0.12s ease;
+}
+
+.pc-pressable:hover {
+    box-shadow: inset 0 0 0 999px rgba(255, 255, 255, 0.10);
+}
+
+.pc-pressable:active {
+    box-shadow: inset 0 0 0 999px rgba(0, 0, 0, 0.28);
+}
+
+.pc-pressable:active:not(.pc-no-step) {
+    top: 1px;
+}
+
+.pc-no-hover:hover {
+    box-shadow: none;
+}
+
+.pc-pressable:focus-visible {
+    outline: 1px solid var(--pc-info-light);
+    outline-offset: 1px;
+}
+
+.pc-pressable:disabled,
+.pc-pressable:disabled:hover,
+.pc-pressable:disabled:active {
+    box-shadow: none;
+}
+
+/* ---------- Section-level toolbar (bulk actions) ---------- */
+
+.pc-section-toolbar {
+    flex-wrap: wrap;
+}
+
+/* ---------- Entry-actions toolbar (above the grid/list) ---------- */
+
+.pc-entry-toolbar {
+    display: flex;
+    background: var(--pc-panel);
+    align-items: center;
+    margin: 4px;
+    gap: 6px;
+    padding: 4px;
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+}
+
+.pc-entry-toolbar-group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+/* ---------- Counters (round 39 unification) ----------
+   .pc-count-pill is the shared chrome of every "N of M" chip: the bulk
+   bar's "N selected" toggle and the section row's visible/total pill.
+   One geometry, one hover, one RESERVED 2px ring (transparent border
+   always present, so arming a filter only changes its COLOR and no
+   layout ever shifts). Variants below carry only what differs. */
+
+.pc-count-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    font-size: 12px;
+    color: var(--pc-safe-light);
+    background: rgba(255, 255, 255, 0.06);
+    border-radius: 3px;
+    border: 2px solid transparent;
+    padding: 0 4px;
+    white-space: nowrap;
+    cursor: pointer;
+    user-select: none;
+}
+
+.pc-count-pill:hover {
+    background: rgba(255, 255, 255, 0.14);
+    border-color: color-mix(in srgb, var(--pc-safe) 45%, transparent);
+}
+
+/* ON = the panel is currently narrowed through this count: the green
+   2px ring sits around the number you are looking through. */
+.pc-count-pill.pc-on {
+    border-color: var(--pc-safe);
+}
+
+/* Non-interactive carrier of the pill look (preset options error text):
+   no pointer affordance, no hover wash. */
+.pc-count-pill.pc-count-inert {
+    cursor: default;
+}
+
+.pc-count-pill.pc-count-inert:hover {
+    background: rgba(255, 255, 255, 0.06);
+    border-color: transparent;
+}
+
+.pc-entry-toolbar-spacer,
+.pc-preview-header-spacer {
+    flex: 1 1 auto;
+}
+
+/* ---------- Bulk-action bar: the contextual row that appears directly
+   under a panel's own toolbar while cards are selected (or, in a section,
+   while the clipboard holds something). Tinted with the same accent the
+   selected cards already wear, so the bar reads as part of the selection
+   rather than as permanent chrome, and kept shorter and lighter than the
+   toolbar above it because it comes and goes. The inset left ribbon echoes
+   the entry rows' accent border-left. ---------- */
+.pc-bulk-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 4px;
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+    background: color-mix(in srgb, var(--pc-info) 10%, transparent);
+}
+
+/* ---------- Pick-add toolbar: the "adding to <section>" bulk bar shown
+   in the Library panel while picking prompts to send to a section. It's
+   a .pc-bulk-toolbar variant, but needs its own distinct look so it
+   doesn't read as an ordinary selection bar -- this one represents an
+   in-progress cross-panel action (library -> section), not a selection
+   the person can act on right here with copy/cut/delete. A dashed
+   top-and-bottom rule (rather than the plain solid underline every other
+   toolbar uses) marks it as a temporary, mode-like strip, and the
+   background is tinted a bit stronger than a normal bulk-toolbar so the
+   "you are in add mode" state stays visible even after the initial
+   banner scrolls out of view. The left accent ribbon (inherited from
+   .pc-bulk-toolbar) is set from JS to the TARGET section's own color
+   (see buildLibraryToolbar's --accent), so the strip itself tells you
+   which section you're adding into. */
+.pc-pick-add-toolbar {
+    background: color-mix(in srgb, var(--accent, var(--pc-info)) 18%, var(--pc-panel-deep));
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+.pc-pick-add-group {
+    flex-wrap: wrap;
+}
+
+/* ---------- Body: left / right panels ---------- */
+
+.pc-body {
+    display: flex;
+    flex: 1 1 auto;
+    min-height: 0;
+}
+
+.pc-left-panel {
+    /* clamp() enforces the width bounds directly in the layout engine,
+       independent of the splitter-drag JS math: the left panel can
+       never claim more than "100% minus the right panel's own
+       minimum width and the splitter's width" (--pc-split-max-reserve,
+       set from JS in applySplit()), so the right panel (flex: 1 1
+       auto) always has at least its minimum width left over no matter
+       what --pc-split gets set to. Without this, a flex-basis with
+       flex-shrink:0 has no ceiling of its own and can push the right
+       panel into overflow if the JS clamp is ever off by even one
+       stale measurement. Both bounds come from JS (see applySplit)
+       rather than being hardcoded here, so they can't drift out of
+       sync with LEFT_PANEL_MIN_WIDTH / RIGHT_PANEL_MIN_WIDTH. */
+    flex: 0 0 clamp(var(--pc-split-min, 160px), var(--pc-split, 32%), calc(100% - var(--pc-split-max-reserve, 226px)));
+    width: clamp(var(--pc-split-min, 160px), var(--pc-split, 32%), calc(100% - var(--pc-split-max-reserve, 226px)));
+    background: var(--pc-panel-deep);
+    border-right: none;
+    display: flex;
+    flex-direction: column;
+    /* The panel itself no longer scrolls as a whole -- the section
+       toolbar (a direct, pinned child; see .pc-left-panel > .pc-section-toolbar
+       below) needs to stay visible at the top per spec ("Section
+       toolbar at top") even when the section list below it overflows.
+       Only .pc-section-list scrolls (see its own overflow-y rule). */
+    overflow: hidden;
+    padding: 4px;
+    gap: 4px;
+    min-width: 160px;
+}
+
+.pc-left-panel > .pc-section-toolbar {
+    /* Pinned above the scrolling section list; never shrinks or
+       scrolls away regardless of how many sections exist. */
+    flex: 0 0 auto;
+    margin: 0;
+}
+
+.pc-splitter {
+    flex: 0 0 6px;
+    width: 6px;
+    cursor: col-resize;
+    background: var(--pc-panel);
+    position: relative;
+}
+
+.pc-splitter::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 2px;
+    height: 28px;
+    transform: translate(-50%, -50%);
+    background: var(--pc-btn-border);
+    border-radius: 1px;
+}
+
+.pc-splitter:hover,
+.pc-splitter:active {
+    background: var(--pc-info);
+}
+
+.pc-splitter:hover::after,
+.pc-splitter:active::after {
+    background: var(--pc-info-pale);
+}
+
+body.pc-resizing {
+    cursor: col-resize !important;
+    user-select: none;
+}
+
+.pc-section-list {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    /* Fills whatever space is left under the pinned toolbar and above
+       the Add Section button, and scrolls independently once the
+       section list overflows -- see .pc-left-panel's overflow:hidden
+       comment for why the panel itself no longer scrolls as a whole. */
+    flex: 1 1 auto;
+    overflow-y: auto;
+    min-height: 0;
+    /* This list is torn down and rebuilt on every render, and
+       ScrollPreserver re-applies its own scrollTop (see dom_utils.js).
+       Opting out of the browser's scroll anchoring stops it from
+       making a competing correction of its own in between, which
+       would otherwise read as a small extra jump on top of ours. */
+    overflow-anchor: none;
+}
+
+.pc-section-row {
+    display: flex;
+    align-items: center;
+    gap: 1px;
+    padding: 4px 4px;
+    border-radius: 4px;
+    background: var(--pc-panel);
+    cursor: grab;
+    border: 1px solid transparent;
+}
+
+.pc-library-row {
+    /* Library is pinned and can never be reordered (per spec), so it
+       gets a normal pointer cursor instead of the draggable "grab"
+       cursor every real section row has, and a small bottom margin to
+       visually separate it from the reorderable list beneath it. */
+    cursor: pointer;
+    margin-bottom: 4px;
+}
+
+.pc-library-row .pc-icon-btn {
+    flex: 0 0 auto;
+    opacity: 0.85;
+}
+
+.pc-section-row:hover {
+    /* Round 40: wash instead of filter -- same lift, no compositing. */
+    box-shadow: inset 0 0 0 999px rgba(255, 255, 255, 0.06);
+}
+
+.pc-section-row.pc-disabled:hover {
+    background: var(--pc-panel) !important;
+    filter: none;
+}
+
+.pc-section-row.pc-active-row,
+.pc-section-row.pc-drop-valid {
+    border-color: var(--pc-info);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--pc-info) 40%, transparent);
+}
+
+
+.pc-section-row.pc-drop-forbidden {
+    cursor: not-allowed;
+    border-color: var(--pc-danger);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--pc-danger) 35%, transparent);
+}
+
+.pc-section-row.pc-disabled {
+    background: var(--pc-panel) !important;
+}
+
+.pc-section-row.pc-disabled .pc-section-name,
+.pc-section-row.pc-disabled .pc-section-count,
+.pc-section-row.pc-disabled .pc-section-alert,
+.pc-section-row.pc-disabled .pc-btn.pc-end-separator-btn,
+.pc-section-row.pc-disabled .pc-icon-btn,
+.pc-section-row.pc-disabled .pc-swatch {
+    opacity: 0.45;
+}
+
+/* ---------- Drag-and-drop visual feedback ----------
+ * Shared by section rows, grid entry cards, and list entry rows.
+ * Kept intentionally simple: no animation library, just two states.
+ *
+ * ".pc-dragging"      — applied to the element being dragged: lifted up
+ *                    with a shadow, slightly faded, so it visually
+ *                    separates from the list underneath it.
+ * ".pc-drag-over-top" / ".pc-drag-over-bottom" — applied to whichever
+ *                    element the cursor is currently over, drawing a
+ *                    thin insertion line on the edge where the
+ *                    dragged item will land (top/bottom for vertical
+ *                    lists, reused as left/right for the horizontal
+ *                    entry grid via the same class names).
+ */
+
+.pc-section-row.pc-dragging,
+.pc-entry-card.pc-dragging,
+.pc-entry-row.pc-dragging {
+    opacity: 0.5;
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.5);
+    transform: translateY(-2px);
+    cursor: grabbing;
+}
+
+.pc-entry-card.pc-dragging {
+    transform: scale(1.03);
+}
+
+/* Vertical lists: section rows and list-view entry rows get a
+ * horizontal insertion line above/below the hovered row. */
+.pc-section-row.pc-drag-over-top,
+.pc-entry-row.pc-drag-over-top {
+    box-shadow: inset 0 2px 0 0 var(--pc-info);
+}
+
+.pc-section-row.pc-drag-over-bottom,
+.pc-entry-row.pc-drag-over-bottom {
+    box-shadow: inset 0 -2px 0 0 var(--pc-info);
+}
+
+/* A section row can pick up drag-over-top/bottom (from wireDragReorder,
+ * always listening for its OWN "text/pc-section" drag type regardless
+ * of what's actually being dragged) at the same time as
+ * pc-drop-valid/pc-drop-forbidden (from the library-prompt / cross-
+ * section-entry drop handling added alongside it). Both are `box-shadow:
+ * inset` rules that would otherwise fight for the same visual property
+ * when a person drags an ENTRY (not another section) over a section
+ * row -- the reorder insertion-line doesn't apply to that drag at all
+ * (getData("text/pc-section") comes back empty, so no reorder ever
+ * actually happens), so once a row is a valid/forbidden drop target
+ * for something else, its own insertion-line indicator is suppressed
+ * in favor of the drop-valid/forbidden highlight, which is the
+ * accurate feedback for what's actually being dragged. */
+.pc-section-row.pc-drop-valid.pc-drag-over-top,
+.pc-section-row.pc-drop-valid.pc-drag-over-bottom {
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--pc-info) 40%, transparent);
+}
+
+.pc-section-row.pc-drop-forbidden.pc-drag-over-top,
+.pc-section-row.pc-drop-forbidden.pc-drag-over-bottom {
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--pc-danger) 35%, transparent);
+}
+
+/* Horizontal grid: entry cards get a vertical insertion line on the
+ * left/right edge instead, since cards flow left-to-right. */
+.pc-entry-card.pc-drag-over-top {
+    box-shadow: inset 2px 0 0 0 var(--pc-info);
+}
+
+.pc-entry-card.pc-drag-over-bottom {
+    box-shadow: inset -2px 0 0 0 var(--pc-info);
+}
+
+.pc-swatch {
+    width: 16px;
+    height: 16px;
+    border-radius: 3px;
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    padding: 1px 0px 0px 0px;
+    cursor: pointer;
+    flex: 0 0 auto;
+}
+
+.pc-swatch svg {
+    opacity: 0;
+    transition: opacity 0.12s ease;
+}
+
+.pc-section-row:hover .pc-swatch svg {
+    filter: drop-shadow(0 0 1px #000000);
+    opacity: 0.88;
+}
+
+.pc-icon-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    color: var(--pc-text);
+    cursor: pointer;
+    font-size: 12px;
+    padding: 0 2px;
+    flex: 0 0 auto;
+    opacity: 0.7;
+}
+
+
+.pc-icon-btn:hover {
+    opacity: 1;
+}
+
+.pc-icon-btn.pc-on {
+    opacity: 1;
+    filter: drop-shadow(0 0 2px var(--pc-gold));
+}
+
+.pc-section-name,
+.pc-notice-text {
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.pc-section-row-meta {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: 0 0 auto;
+}
+
+/* The section row's visible/total pill: chrome + clickability + ring
+   all ride the shared .pc-count-pill base (round 39); this variant is
+   only the smaller type and the value child's nowrap. */
+.pc-section-count {
+    font-size: 10px;
+    flex: 0 0 auto;
+}
+
+/* Round 21b: the affordances belong to the CLICKABLE state only. An
+   empty section's pill is inert -- and must keep its orange background
+   untouched by hover (the whole point of the orange is to read as a
+   gap; a hover wash would erase it). */
+.pc-section-count:not(.pc-section-count-empty) {
+    cursor: pointer;
+}
+
+.pc-section-count.pc-section-count-empty {
+    cursor: default;
+}
+
+.pc-section-count.pc-section-count-empty:hover {
+    box-shadow: none; /* round 40: also pin the shared pressable wash off */
+    background: var(--pc-warn-deep);
+    border-color: transparent;
+}
+
+.pc-section-count-value {
+    white-space: nowrap;
+}
+
+/* The alert chip (rounds 26-28): the section row's OWN icon-button skin
+   (.pc-icon-btn above) plus what makes it an alert -- the ICON COLOR is
+   the state (red while MISSING cards exist, amber for workflow-copy
+   cards, red first), a green OUTLINE while armed (outlines take no
+   layout; it replaces the shared yellow .pc-on glow for this button),
+   and hidden at 0/0. There is no Library-row chip: library cards
+   simply ARE the folder. */
+.pc-section-alert {
+    min-width: 16px;
+    min-height: 16px;
+    border-radius: 4px;
+    opacity: 1;
+}
+
+.pc-section-alert[hidden] {
+    display: none;
+}
+
+.pc-section-alert:hover {
+    background: #ffffff25;
+    outline: 2px solid color-mix(in srgb, var(--pc-safe) 45%, transparent);
+    /* border-radius: 4px; */
+}
+
+.pc-alert-red {
+    color: var(--pc-danger);
+}
+
+.pc-alert-amber {
+    color: var(--pc-warn);
+}
+
+.pc-section-alert.pc-on {
+    filter: none;
+    box-shadow: none; /* round 40: armed chips carry state, not a hover lift */
+    outline: 2px solid var(--pc-safe);
+    border-radius: 4px;
+}
+
+/* Section contributes nothing -- no cards (0/0) or none visible (0/N):
+   swap the calm green-on-subtle pill for an orange one with gray text so
+   the empty section reads as a gap at a glance. */
+.pc-section-count-empty {
+    background: var(--pc-warn-deep);
+    color: var(--pc-text);
+}
+
+.pc-btn.pc-entry-selection-reset {
+    margin: 0 0 0 -2px;
+    background: var(--pc-warn-deep);
+    border-color: var(--pc-warn);
+    color: #fff;
+}
+
+.pc-entry-selection-reset[hidden] {
+    display: none;
+}
+
+.pc-btn.pc-entry-selection-reset:hover {
+    background: var(--pc-warn);
+    border-color: var(--pc-warn-pale);
+    color: #fff;
+}
+
+.pc-section-row .pc-btn.pc-end-separator-btn {
+    margin-left: 0;
+    min-width: 18px;
+    min-height: 18px;
+    padding: 0px 0px;
+    font-size: 12px;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.pc-add-section-btn {
+    margin-top: 4px;
+    background: color-mix(in srgb, var(--pc-safe) 25%, transparent);
+    border: 2px dashed color-mix(in srgb, var(--pc-safe) 50%, transparent);
+    color: var(--pc-safe-pale);
+    border-radius: 4px;
+    padding: 6px;
+    cursor: pointer;
+}
+
+.pc-add-section-btn:hover {
+    background: color-mix(in srgb, var(--pc-safe) 50%, transparent);
+    color: var(--pc-text);
+}
+
+/* ---------- Right panel: entry grid ---------- */
+
+.pc-right-panel {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    min-width: 220px; /* keep in sync with RIGHT_PANEL_MIN_WIDTH in prompt_composer.js */
+    overflow: hidden;
+    background: var(--pc-panel-deep);
+}
+
+.pc-panel-title {
+    font-weight: 600;
+    color: var(--pc-text);
+    text-align: center;
+}
+
+.pc-sep-select {
+    background: var(--pc-panel);
+    color: var(--pc-text);
+    border: 1px solid var(--pc-btn-border);
+    border-radius: 4px;
+    padding: 2px 2px;
+}
+
+.pc-entry-grid {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-anchor: none; /* see .pc-section-list: same rebuild + manual scroll restore */
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    gap: 4px;
+    padding: 4px;
+    align-content: start;
+}
+
+/* Chunked loading (see js/chunked_fill.js + ComposerUI render paths):
+   the grid/list containers above are the scroll surfaces, and cards now
+   enter across animation frames with loading="lazy" thumbnails. One
+   deliberate omission here: content-visibility:auto on the cards would
+   also skip off-screen layout, but it applies paint containment at ALL
+   times, and this app paints at the box edges -- the corner-pinned
+   pick checkbox and options button, focus outlines that offset outward,
+   the drag-over ribbon ::before sitting at top:-1px. It would also make
+   every scroll reversal a re-layout-visible frame (the "smoother
+   scrolling" half of this feature). Lazy thumbnails already withhold
+   the fetch + decode + image-layout cost for off-screen cards, which
+   was the dominant per-card expense anyway. */
+
+/* ---------- List view (compact rows: thumb, name, ..., delete) ---------- */
+
+.pc-entry-list {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-anchor: none; /* see .pc-section-list: same rebuild + manual scroll restore */
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 4px;
+}
+
+.pc-entry-row {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: var(--pc-panel);
+    border-radius: 4px;
+    padding: 2px 4px;
+    cursor: pointer;
+}
+
+.pc-entry-row:hover {
+    background: var(--pc-panel-light);
+}
+
+/* Row accent while the entry is VISIBLE (Show) -- grid twin below.
+   Library rows share the look when SELECTED (their tick): same accent,
+   same meaning of "this card is the active one in this panel". */
+.pc-entry-row.pc-entry-visible,
+.pc-library-row-item.pc-selected {
+    outline: 1px solid var(--accent, var(--pc-info));
+    outline-offset: -1px;
+    border-left: 8px solid var(--accent, var(--pc-info));
+    background: var(--pc-safe-tint);
+}
+
+.pc-entry-card.pc-library-card.pc-selected {
+    border-color: var(--accent, var(--pc-info));
+    background: var(--pc-safe-tint);
+}
+
+/* List-view counterparts of the grid card's hidden/selected states
+ * above -- same rationale, applied to the row layout instead. */
+.pc-entry-row.pc-entry-hidden,
+.pc-entry-card.pc-entry-hidden {
+    opacity: 0.5;
+    filter: grayscale(35%);
+}
+
+.pc-entry-row.pc-entry-hidden:hover,
+.pc-entry-card.pc-entry-hidden:hover {
+    opacity: 0.85;
+    filter: grayscale(15%);
+}
+
+/* List-view twin of the grid card's selection glow (see the
+ * .pc-entry-card rule further down): a ::after inset --pc-info glow
+ * riding over the 44px thumbnail's edge, stacked above the image and
+ * under the options overlay and star. The row's left edge keeps
+ * carrying the VISIBLE accent -- the two states stay independently
+ * readable. (r50: the 2px border ring was retired; the glow IS the
+ * selection look. The stripe widening deliberately shifts row content
+ * on visibility toggles -- user's call, no reservation.) */
+.pc-entry-row:not(.pc-library-row-item).pc-selected .pc-entry-row-thumb::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    pointer-events: none;
+    box-shadow: inset 0 0 7px 7px var(--pc-info); /* grid twin's
+        glow, scaled for the 44px thumb */
+}
+
+.pc-entry-row-thumb {
+    position: relative;
+    flex: 0 0 auto;
+    width: 44px;
+    height: 44px;
+    border-radius: 4px;
+    overflow: hidden;
+    background: var(--pc-panel-deep);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.pc-entry-row-thumb .pc-entry-image,
+.pc-entry-row-thumb .pc-entry-image-placeholder {
+    width: 100%;
+    height: 100%;
+}
+
+.pc-entry-row-options-overlay {
+    position: absolute;
+    z-index: 2; /* above the selection glow overlay (z:1) */
+    top: 2px;
+    left: 2px;
+    opacity: 0;
+    transition: opacity 0.12s ease;
+}
+
+.pc-entry-row:hover .pc-entry-row-options-overlay {
+    opacity: 1;
+}
+
+.pc-entry-row-text {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+
+.pc-entry-row-name {
+    /* Flex, not bare text (smoke feedback #2): the name child
+       ellipsizes and the "workflow copy" badge keeps its place at the
+       end -- as a plain text div the badge was pushed out of the
+       overflow-hidden box by long names. */
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+    overflow: hidden;
+    font-size: 12px;
+    color: var(--pc-text);
+}
+
+.pc-entry-row-prompt {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: flex;
+    align-items: center;
+    font-size: 10px;
+    color: var(--pc-text-dim);
+}
+
+.pc-entry-row-actions {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.pc-entry-row-action.pc-entry-random-btn,
+.pc-entry-row-action.pc-entry-separator-btn {
+    position: static;
+    opacity: 1;
+    bottom: auto;
+    left: auto;
+    right: auto;
+    top: auto;
+}
+
+.pc-entry-card {
+    position: relative;
+    background: var(--pc-panel);
+    border: 2px solid transparent;
+    border-radius: 6px;
+    padding: 4px;
+    cursor: pointer;
+    transition: border-color 0.15s ease, transform 0.1s ease;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.pc-entry-card:hover {
+    transform: translateY(-1px);
+}
+
+/* Accent border while the entry is VISIBLE (Show) -- the section panel's
+   positive inclusion state. The selection glow (thumbnail ::after,
+   below) is layered independently, so a card can show both at once. Library
+   cards keep their own .pc-selected border rule further up; only
+   sections moved to .pc-entry-visible here. */
+.pc-entry-card.pc-entry-visible {
+    border-color: var(--accent, var(--pc-info));
+    background: var(--pc-safe-tint);
+}
+
+/* Entries with visible=false (Hidden -- excluded from composed output).
+ * Dimmed via opacity + desaturation rather than hidden, so the card
+ * stays fully visible/clickable -- this is a MUTED state, not an
+ * inert/unresponsive one (the card still responds to clicks, drag, and
+ * its own buttons normally). Hovering restores full visibility so it
+ * doesn't feel unreachable while the mouse is over it. */
+
+/* SELECTION (the top-right checkbox -- copy/cut/delete target) is an
+ * inset --pc-info GLOW over the thumbnail's inner edge, grid and list
+ * alike (r50: the 2px border ring was retired in favor of it). The
+ * glow is a dedicated ::after overlay, NOT a box-shadow on the wrap
+ * itself -- an inset shadow on the wrap paints UNDER the image child
+ * and would be invisible over real artwork. As a generated last child
+ * it stacks above the image (z:auto), under the hover overlay (z:2)
+ * and under every control (checkbox/star/options at z:3). Info is
+ * deliberately the fixed --pc-info blue, not the section accent: the
+ * card border / row stripe already carry the accent for VISIBLE, and
+ * two states need two colors. */
+.pc-entry-card:not(.pc-library-card).pc-selected .pc-entry-image-wrap::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    pointer-events: none;
+    box-shadow: inset 0 0 14px 16px var(--pc-info); /* theme glow via
+        the info token -- retints when --pc-info moves */
+}
+
+.pc-entry-image-wrap {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 1 / 1;
+    background: var(--pc-panel-deep);
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.pc-entry-image {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.pc-entry-image-placeholder {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: color-mix(in srgb, var(--pc-text-dim) 55%, var(--pc-shadow));
+    font-size: 11px;
+}
+
+/* Missing-entry thumbnail variant (grid view): warning glyph on top of
+   the entry's dead prompt_ref, printed as text so broken cards are
+   distinguishable from one another. See buildMissingThumbnail() in
+   ui_panels.js. */
+.pc-entry-image-placeholder-missing {
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: center;
+    gap: 5px;
+    padding: 6px 5px;
+    background: repeating-linear-gradient(
+        -45deg,
+        color-mix(in srgb, var(--pc-danger) 7%, transparent),
+        color-mix(in srgb, var(--pc-danger) 7%, transparent) 6px,
+        color-mix(in srgb, var(--pc-danger) 16%, transparent) 6px,
+        color-mix(in srgb, var(--pc-danger) 16%, transparent) 12px
+    );
+    color: var(--pc-danger);
+}
+
+.pc-entry-missing-glyph {
+    flex: 0 0 auto;
+    font-size: 17px;
+    font-weight: 700;
+    line-height: 1;
+    text-align: center;
+    color: color-mix(in srgb, var(--pc-danger) 85%, transparent);
+}
+
+.pc-entry-missing-ref {
+    flex: 0 1 auto;
+    min-height: 0;
+    font-size: 9px;
+    line-height: 1.25;
+    font-family: Consolas, "Courier New", monospace;
+    text-align: center;
+    color: var(--pc-danger-pale);
+    word-break: break-all;
+    overflow: hidden;
+    /* Cap the ref at a few lines so an unusually long name_UID can't
+       stretch the (otherwise square, aspect-ratio-locked) thumbnail. */
+    display: -webkit-box;
+    -webkit-line-clamp: 4;
+    line-clamp: 4;
+    -webkit-box-orient: vertical;
+}
+
+/* No-thumbnail prompt (stored on disk as a .txt): a flat dark-gray tile
+   with an orange "image off" glyph centered. Distinct from the red
+   MISSING variant above -- that is a dead pointer to a deleted prompt,
+   this is a real prompt that simply has no picture. See
+   buildNoThumbnailPlaceholder() in ui_panels.js. */
+.pc-entry-image-placeholder-nothumb {
+    background: var(--pc-panel-deep);
+    color: var(--pc-warn-pale);
+    align-items: center;
+    justify-content: center;
+}
+
+.pc-entry-image-placeholder-nothumb svg {
+    width: 26px;
+    height: 26px;
+    opacity: 0.92;
+}
+
+.pc-entry-image-delete {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    z-index: 3;
+    width: 24px;
+    height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--pc-danger-deep) 90%, transparent);
+    color: var(--pc-danger-pale);
+    cursor: pointer;
+}
+
+.pc-entry-image-delete:hover {
+    background: var(--pc-danger-deep);
+    color: #fff;
+}
+
+
+.pc-entry-image-wrap.pc-drag-over {
+    outline: 2px dashed var(--pc-info);
+    outline-offset: -2px;
+}
+
+.pc-entry-image-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 2; /* above the selection glow overlay (z:1) */
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    align-items: stretch;
+    gap: 4px;
+    padding: 16px 6px 6px 6px;
+    background: color-mix(
+        in srgb,
+        color-mix(in srgb, var(--accent, var(--pc-shadow)) 50%, #000000 50%) 70%,
+        transparent
+    );
+    opacity: 0;
+    transition: opacity 0.15s ease;
+    pointer-events: none;
+    box-sizing: border-box;
+}
+
+.pc-entry-image-wrap:hover .pc-entry-image-overlay {
+    opacity: 1;
+}
+
+.pc-entry-overlay-text {
+    font-size: 10px;
+    line-height: 1.3;
+    color: #fff;
+    max-height: 100%;
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+    word-break: break-word;
+}
+
+.pc-entry-overlay-badges {
+    display: flex;
+    flex: 0 0 auto;
+    gap: 2px;
+    width: 100%;
+}
+
+.pc-entry-label {
+    font-size: 11px;
+    text-align: center;
+    color: var(--pc-text);
+    /* Flex container (see .pc-entry-row-name): the name shrinks, the
+       "workflow copy" badge never does. Same rule for card and row. */
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+}
+
+.pc-entry-label-name {
+    /* The ellipsis lives on the name itself now -- a long name can no
+       longer shove the badge out of the card. */
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* "(Missing) — pick a prompt" button, shown on an entry card/row whose
+   prompt_ref no longer resolves (the library prompt was deleted).
+   Deliberately styled as a real actionable control (not plain red
+   text) -- warm/danger red background makes the problem visible at a
+   glance, while still reading as clickable like every other button in
+   the app. */
+.pc-entry-missing-btn {
+    width: 70%;
+    background: color-mix(in srgb, var(--pc-danger) 18%, transparent);
+    border: 1px solid color-mix(in srgb, var(--pc-danger) 50%, transparent);
+    color: var(--pc-danger);
+    border-radius: 4px;
+    padding: 4px 6px;
+    font-size: 10px;
+    line-height: 1.3;
+    cursor: pointer;
+    text-align: center;
+    white-space: normal;
+}
+
+.pc-entry-missing-btn:hover {
+    background: color-mix(in srgb, var(--pc-danger) 30%, transparent);
+    border-color: color-mix(in srgb, var(--pc-danger) 75%, transparent);
+    color: var(--pc-danger-pale);
+}
+
+/* Grid card variant: sits in the card's LABEL slot (it replaces the
+   prompt name for a missing entry rather than adding a third row under
+   it), so it takes the same single-slot space the label would have. */
+.pc-entry-missing-btn-card {
+    /* flex: 0 0 auto; */
+    padding: 0px 0px;
+    transform: translateX(22%);
+
+}
+
+/* List row variant: now the FIRST line of the row's text column (it
+   takes the name's slot), so it hugs the top and only spans as wide as
+   its own label. */
+.pc-entry-missing-btn-row {
+    width: auto;
+    align-self: flex-start;
+}
+
+/* Inline marker for an entry whose SHOWN text comes from the copy
+   embedded in the loaded workflow, not from the local library (see
+   buildWorkflowCopyBadge / workflow_restore.js mergeWorkflowContent).
+   Amber, not the red of "(Missing)": the prompt IS readable here --
+   but it is not a live library record, and clicking the badge routes
+   to the same "pick a replacement" flow the missing card uses. */
+.pc-entry-workflow-badge {
+    display: inline-block;
+    margin-left: 4px;
+    padding: 0 4px;
+    border-radius: 3px;
+    font-size: 8px;
+    line-height: 1.5;
+    vertical-align: middle;
+    cursor: pointer;
+    color: var(--pc-warn);
+    background: color-mix(in srgb, var(--pc-warn) 14%, transparent);
+    border: 1px solid color-mix(in srgb, var(--pc-warn) 45%, transparent);
+    white-space: nowrap;
+    /* Lives inside the flex name row now: never shrink, never wrap --
+       the ellipsis is the name's job (smoke feedback #2). */
+    flex: 0 0 auto;
+}
+
+.pc-entry-workflow-badge:hover {
+    color: var(--pc-warn-pale);
+    background: color-mix(in srgb, var(--pc-warn) 26%, transparent);
+    border-color: color-mix(in srgb, var(--pc-warn) 70%, transparent);
+}
+
+/* The dead prompt_ref, printed where the prompt preview normally goes on
+   a missing list row -- the only identifying text the entry has left. */
+.pc-entry-row-prompt-missing {
+    font-family: Consolas, "Courier New", monospace;
+    color: var(--pc-danger-pale);
+}
+
+.pc-entry-options-btn {
+    position: absolute;
+    top: 0px;
+    left: 0px;
+    background: rgba(0, 0, 0, 0.55);
+    color: #fff;
+    border: none;
+    border-radius: 3px;
+    width: 16px;
+    height: 16px;
+    line-height: 16px;
+    text-align: center;
+    padding: 0;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.12s ease;
+    z-index: 3;
+}
+
+.pc-entry-card:hover .pc-entry-options-btn {
+    opacity: 1;
+}
+
+/* Same dead end as the favorite star: with no hover there is no way to
+   reveal a card's options button, and it is the ONLY route to a prompt's
+   edit panel -- which is where its delete lives too. So on a device whose
+   primary pointer cannot hover, every options button stays put.
+   Covers the list-row variant as well (it carries both classes on the same
+   element). Placed after both base rules, since a media query adds no
+   specificity and only wins by coming later.
+   The bulk-selection checkbox needs nothing here: it is always visible. */
+@media (hover: none) {
+    .pc-entry-options-btn {
+        opacity: 1;
+    }
+}
+
+/* ---------- Bulk-selection checkbox (the per-card delete button it
+   replaced is gone; deletion lives in the edit panel and the toolbar) ---------- */
+
+.pc-entry-select-checkbox {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    z-index: 3;
+    width: 16px;
+    height: 16px;
+    margin: 0;
+    cursor: pointer;
+    /* Always visible (not hover-only) -- unlike the icon buttons it
+       replaces, a checkbox that only appears on hover would make it
+       impossible to see which cards are currently selected at a glance
+       while the mouse is elsewhere. */
+    opacity: 1;
+}
+
+.pc-entry-row .pc-entry-select-checkbox {
+    /* Inside .pc-entry-row-actions (a normal flex row), not absolutely
+       positioned like the grid card's version -- it just sits at the
+       end of the row's action icons, on the right side per spec. */
+    position: static;
+    width: 14px;
+    height: 14px;
+}
+
+/* ---------- Missing-entry replacement flow ---------- */
+
+/* Banner shown at the top of the Library panel while picking a
+   replacement prompt_ref for a missing entry (see ComposerUI's
+   _replacingEntryTarget / startReplacingEntry). Warm amber tone
+   matches the app's existing "needs attention" language (see the
+   warn/gold family), distinct from the blue info glow used for
+   bulk-selection state. */
+/* Banner strip at the top of the Library panel while it is in one of its
+   two focused modes. Amber for the repair -- replacing a missing card is
+   warning-shaped work -- and blue for the add, which is ordinary work the
+   person started on purpose. */
+.pc-replace-notice,
+.pc-pick-add-notice {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px 8px;
+    background: color-mix(in srgb, var(--pc-gold-deep) 12%, transparent);
+    border-bottom: 2px solid color-mix(in srgb, var(--pc-gold-deep) 35%, transparent);
+    color: var(--pc-gold-pale);
+    font-size: 12px;
+    font-weight: 520;
+    flex: 0 0 auto;
+}
+
+
+
+/* The commit button carries a whole clause ("Add 3 prompts to Characters"),
+   so keep it on one line and let the spacers either side absorb the rest. */
+.pc-pick-add-confirm {
+    flex: 0 0 auto;
+    white-space: nowrap;
+}
+
+/* While in pick mode, every library card/row is a single "use this"
+   target rather than a multi-select item -- a lighter hover highlight
+   (instead of the normal selected/accent border) reinforces that
+   clicking ANY card immediately finishes the action, with no
+   intermediate "selected" state to visually track. */
+.pc-library-pick-mode:hover {
+    box-shadow: 0 0 0 2px var(--pc-gold);
+    cursor: pointer;
+}
+
+.pc-library-pick-badge {
+    font-size: 10px;
+    text-align: center;
+    color: var(--pc-gold-ink);
+    background: var(--pc-gold-pale);
+    border-radius: 3px;
+    padding: 2px 4px;
+    opacity: 0;
+    transition: opacity 0.12s ease;
+}
+
+.pc-library-pick-mode:hover .pc-library-pick-badge {
+    opacity: 1;
+}
+
+.pc-entry-row.pc-library-pick-mode .pc-library-pick-badge {
+    /* List view: no hover-reveal needed (the row is already a
+       clearly-labeled full-width target), so keep it always visible
+       rather than requiring a hover to discover it exists. */
+    opacity: 1;
+    flex: 0 0 auto;
+}
+
+.pc-entry-random-btn,
+.pc-entry-separator-btn {
+    position: absolute;
+    bottom: 2px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.55);
+    color: var(--pc-text-dim);
+    border: none;
+    border-radius: 3px;
+    width: 18px;
+    height: 18px;
+    line-height: 18px;
+    text-align: center;
+    padding: 0;
+    font-size: 10px;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.12s ease, color 0.12s ease;
+    z-index: 2;
+}
+
+.pc-entry-card:hover .pc-entry-random-btn,
+.pc-entry-card:hover .pc-entry-separator-btn,
+.pc-entry-random-btn.pc-always-visible,
+.pc-entry-separator-btn.pc-always-visible {
+    opacity: 1;
+}
+
+.pc-entry-random-btn {
+    left: 2px;
+}
+
+.pc-entry-random-btn.pc-on {
+    color: var(--pc-gold);
+}
+
+.pc-entry-separator-btn {
+    right: 2px;
+    font-family: "SFMono-Regular", Consolas, monospace;
+    font-size: 12px;
+    color: var(--pc-text-dim);
+}
+
+.pc-entry-separator-btn.pc-always-visible {
+    color: var(--pc-gold);
+}
+
+.pc-badge {
+    font-size: 9px;
+    background: color-mix(in srgb, var(--pc-tag) 70%, transparent);
+    color: var(--pc-text);
+    border-radius: 2px;
+    padding: 1px 4px;
+    white-space: nowrap;
+    flex: 0 0 auto;
+}
+
+.pc-badge-row {
+    /* Capped to the card/row's own width and never wraps -- the last
+       badge that still fits clips with an ellipsis and only what
+       follows it collapses into a single "+N" pill (see
+       buildOverflowBadgeRow in ui_panels.js and planVisibleBadges), so
+       this row can never push a card wider than its grid cell or grow
+       taller than one line. */
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    width: 100%;
+    max-width: 100%;
+    overflow: hidden;
+    box-sizing: border-box;
+}
+
+.pc-badge-overflow {
+    color: var(--pc-safe-light);
+    background: color-mix(in srgb, var(--pc-safe-light) 15%, transparent);
+    outline: 1px solid color-mix(in srgb, var(--pc-safe-light) 35%, transparent);
+    outline-offset: -1px;
+    font-weight: 700;
+}
+
+/* Round 57: the clipped LAST-shown badge. The row shows as many whole
+ * pills as fit; when something must go, the badge at the end of the
+ * visible prefix keeps its seat and the TEXT gives: it may shrink below
+ * its content (min-width:0 is the incantation that lets a flex item go
+ * under max-content -- a flex item refuses by default) and the row's
+ * nowrap pills it already has end in an ellipsis instead of being
+ * dropped for the "+N". It shrinks only, never grows: the plan only
+ * picks this badge when the leftover can draw "…" (CLIP_MIN in
+ * badge_fit), so it is a truncated badge, never a stretched bar. */
+.pc-badge-clip {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* Measurement strip for js/badge_fit.js: badge label widths are taken
+   once per unique label from here and cached, instead of by laying every
+   badge out inside its real (and still-growing) card row. Off-screen but
+   NOT display:none -- a hidden subtree reports 0 widths and every row
+   would fall back to rendering its full, untrimmed badge list. */
+.pc-badge-probe {
+    position: fixed;
+    top: 0;
+    left: -99999px;
+    visibility: hidden;
+    pointer-events: none;
+    white-space: nowrap;
+    display: flex;
+}
+
+.pc-badge-probe .pc-badge {
+    display: inline-block; /* so offsetWidth is the pill's own box */
+}
+
+.pc-library-card-badges {
+    display: flex;
+    margin-top: 2px;
+    gap: 2px;
+}
+
+/* ---------- Locked "Prompt" section ---------- */
+
+.pc-locked-prompt-wrap {
+    display: flex;
+    flex-direction: column;
+    /* gap: 6px; */
+    padding: 0px;
+    flex: 1 1 auto;
+    /* This wrap also hosts the Library browser (header, search,
+       category toolbar, "New Prompt" button, then the entry grid/list
+       -- see renderLibraryBrowser in prompt_composer.js), which can
+       easily have more content than fits vertically. Without a height
+       constraint here, the wrap simply grows past the right panel's
+       boundary with nothing to scroll -- cards get silently clipped
+       instead of being reachable via a scrollbar. min-height: 0 is
+       required on a flex child for its own overflow rules to take
+       effect at all (a flex item's default min-height is "auto",
+       which otherwise refuses to shrink below its content's natural
+       size no matter what overflow says); the entry grid/list child
+       itself already scrolls (see .pc-entry-grid/.pc-entry-list), so
+       this wrap only needs to get out of its way.
+    */
+    min-height: 0;
+    overflow: hidden;
+}
+
+.pc-locked-note {
+    flex: 1 1 auto;
+    color: var(--pc-text-dim);
+    font-size: 16px;
+    line-height: 1.5;
+    background: var(--pc-panel-deep);
+    padding: 16px;
+}
+
+/* ---------- Edit panel ---------- */
+
+.pc-edit-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 6px;
+    overflow-y: auto;
+    flex: 1 1 auto;
+}
+
+.pc-field-row {
+    display: flex;
+    flex-direction: row;
+    gap: 4px;
+}
+
+.pc-field-row label {
+    display: flex;
+    align-items: center;
+    font-size: 11px;
+    color: var(--pc-text-dim);
+}
+
+.pc-text-input,
+.pc-text-area {
+    background: var(--pc-text-input);
+    color: var(--pc-text);
+    border: 1px solid var(--pc-btn);
+    border-radius: 4px;
+    padding: 4px 4px;
+    font-family: inherit;
+    font-size: 12px;
+    flex: 1 1 auto;
+}
+
+/* ---------- Preset name input: replaces .pc-preset-select in the top
+   toolbar while creating, saving-as, or renaming a preset. It needs
+   min-width: 0 to shrink like the dropdown it's standing in for (a
+   flex child otherwise refuses to shrink below its content size, which
+   would push the Save/Cancel buttons on the right out of the toolbar).
+   A blue focus ring on top of the normal .pc-text-input look marks it
+   as the live-editing field the toolbar has switched into, echoing the
+   accent color used for selection elsewhere in the UI. */
+.pc-preset-name-input {
+    min-width: 0;
+}
+
+.pc-preset-name-input:focus {
+    outline: none;
+    border-color: var(--pc-info);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--pc-info) 25%, transparent);
+}
+
+.pc-search-field {
+    position: relative;
+    display: flex;
+    align-items: center;
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.pc-search-field .pc-text-input {
+    width: 100%;
+    padding-right: 26px;
+}
+
+.pc-search-clear {
+    position: absolute;
+    right: 5px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--pc-text-dim);
+    cursor: pointer;
+}
+
+.pc-search-clear:hover {
+    color: var(--pc-text);
+}
+
+/* Round 34: the search upgrade's three small surfaces.
+ * Hit marks are a TINT only -- bolding the marks would change the
+ * text width mid-list and make rows jitter as the query updates.
+ * (mark is a bare tag; its class keeps the pc- token discipline.) */
+mark.pc-search-hit {
+    background: color-mix(in srgb, var(--pc-gold) 28%, transparent);
+    color: inherit;
+    border-radius: 2px;
+}
+
+/* "N of M" while a query is live -- sits after the field, quiet. */
+.pc-search-count {
+    flex: 0 0 auto;
+    align-self: center;
+    font-size: 10px;
+    color: var(--pc-text-dim);
+    white-space: nowrap;
+}
+
+/* The honest zero-results block (a sibling of the grid, never inside
+ * it -- see renderLibraryBrowser). */
+.pc-search-empty {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    padding: 24px 12px;
+    text-align: center;
+    color: var(--pc-text-dim);
+    font-size: 12px;
+}
+
+.pc-search-empty-hint {
+    font-size: 10px;
+    color: var(--pc-text-dim);
+}
+
+.pc-search-category-select {
+    flex: 0 1 150px;
+    min-width: 86px;
+    max-width: 180px;
+}
+
+/* The search toolbar reuses the base .pc-toolbar look (padding,
+ * background, bottom border) -- this rule only tightens the gap
+ * between the icon/field/category-select so it doesn't feel as
+ * loosely spaced as the icon-button toolbars above it. */
+.pc-search-toolbar {
+    gap: 8px;
+}
+
+.pc-text-area {
+    min-height: 90px;
+    resize: vertical;
+}
+
+.pc-color-input {
+    width: 43px;
+    height: 23px;
+    padding: 0;
+    border: 1px solid var(--pc-btn);
+    border-radius: 4px;
+    background: none;
+    cursor: pointer;
+}
+
+.pc-checkbox-field {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    color: var(--pc-text);
+    cursor: pointer;
+}
+
+/* ---------- Multi-select dropdown (e.g. Category field) ---------- */
+
+.pc-multiselect {
+    position: relative;
+    width: 100%;
+}
+
+.pc-multiselect-summary {
+    width: 100%;
+    max-width: 100%;
+    /* JS (fitSummaryText) does the actual truncation by measuring real
+       rendered width and deciding how many items fit, so this is a
+       hard ceiling that guarantees the button itself can never grow
+       past its field and push the panel into horizontal scroll --
+       CSS text-overflow alone can't produce a "+N" count, only a
+       visual "...", which is why the trimming logic lives in JS. */
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    text-align: left;
+    cursor: pointer;
+    overflow: hidden;
+    box-sizing: border-box;
+}
+
+.pc-multiselect-summary:hover {
+    border-color: var(--pc-btn-border);
+}
+
+.pc-multiselect-summary-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 0 1 auto;
+    min-width: 0;
+}
+
+.pc-multiselect-summary-badge {
+    flex: 0 0 auto;
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--pc-safe-light);
+    background: color-mix(in srgb, var(--pc-safe-light) 15%, transparent);
+    border: 1px solid color-mix(in srgb, var(--pc-safe-light) 35%, transparent);
+    border-radius: 10px;
+    padding: 1px 6px;
+    white-space: nowrap;
+}
+
+.pc-multiselect-panel {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    right: 0;
+    z-index: 20;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-height: 180px;
+    overflow-y: auto;
+    background: var(--pc-panel-deep);
+    border: 1px solid var(--pc-btn-border);
+    border-radius: 4px;
+    padding: 6px;
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.45);
+}
+
+.pc-multiselect-option {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 6px;
+    border-radius: 3px;
+}
+
+.pc-multiselect-option:hover {
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.pc-multiselect-option-label {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.pc-multiselect-option-actions {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    margin-left: auto;
+}
+
+.pc-multiselect-option-actions .pc-btn {
+    padding: 2px;
+    opacity: 0.75;
+}
+
+.pc-multiselect-option-actions .pc-btn:hover {
+    opacity: 1;
+}
+
+.pc-multiselect-add-category {
+    width: 100%;
+    justify-content: flex-start;
+    border: 0;
+    background: transparent;
+    color: var(--pc-safe-light);
+    cursor: pointer;
+    font: inherit;
+    text-align: left;
+}
+
+.pc-multiselect-add-category svg {
+    flex: 0 0 auto;
+}
+
+.pc-multiselect-category-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 4px;
+}
+
+.pc-multiselect-category-toolbar .pc-multiselect-category-input {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.pc-multiselect-category-toolbar .pc-category-add-button {
+    background: var(--pc-safe-deep);
+    border-color: var(--pc-safe-light);
+    color: #fff;
+}
+
+.pc-multiselect-category-toolbar .pc-category-add-button:hover {
+    background: var(--pc-safe-light);
+    border-color: var(--pc-safe-light);
+}
+
+.pc-multiselect-category-toolbar .pc-category-cancel-button {
+    background: var(--pc-danger);
+    border-color: var(--pc-danger-line);
+    color: #fff;
+}
+
+.pc-multiselect-category-toolbar .pc-category-cancel-button:hover {
+    background: var(--pc-danger-line);
+    border-color: var(--pc-danger-pale);
+}
+
+.pc-multiselect-category-input.pc-category-invalid {
+    color: var(--pc-danger);
+    border-color: var(--pc-danger-line);
+}
+
+.pc-edit-image-preview {
+    position: relative;
+    width: 192px;
+    height: 192px;
+    align-self: center;
+    flex: 0 0 192px;
+    border-radius: 6px;
+    overflow: hidden;
+    background: var(--pc-panel-deep);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.pc-edit-image-preview img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.pc-edit-image-placeholder {
+    border-radius: 6px;
+    border: 2px dashed var(--pc-text-dim);
+    color: var(--pc-text-dim);
+    font-size: 16px;
+    cursor: pointer;
+}
+
+.pc-edit-image-preview .pc-entry-image-delete {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+}
+
+.pc-edit-image-preview.pc-drag-over {
+    border-radius: 6px;
+    outline: 2px dashed var(--pc-info-light);
+    outline-offset: -2px;
+}
+
+.pc-edit-actions {
+    display: flex;
+    gap: 6px;
+    margin-top: auto;
+    padding-top: 8px;
+    flex-wrap: wrap;
+}
+
+/* ---------- Preview ---------- */
+
+.pc-preview {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 4px;
+    background: var(--pc-panel);
+    flex: 0 0 auto;
+    height: 140px;
+}
+
+.pc-preview-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex: 0 0 auto;
+    gap: 6px;
+}
+
+
+/* Layer C3 header chips (see executedChipStates / applyExecutedOutput):
+   tiny provenance badges, hidden until their own condition holds.
+   Round 9 split the single "as generated" chip into two action chips:
+   "Edited" (composition drifted from what ran -- click copies the
+   executed string) and "Reset Seed" (seed drifted -- click restores
+   it), plus the red failure chip. Neutral base; state colors below. */
+.pc-exec-chip {
+    flex: 0 0 auto;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 9px;
+    line-height: 1.6;
+    cursor: pointer;
+    color: var(--pc-safe);
+    background: color-mix(in srgb, var(--pc-safe) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--pc-safe) 40%, transparent);
+    white-space: nowrap;
+    max-width: 45%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* "Edited": same amber language as the dirty Save button and the
+   entry-card workflow-copy badge -- the same kind of news. */
+.pc-exec-chip-edited {
+    color: var(--pc-warn);
+    background: color-mix(in srgb, var(--pc-warn) 14%, transparent);
+    border-color: color-mix(in srgb, var(--pc-warn) 50%, transparent);
+}
+
+/* "Reset Seed": green like "as generated" -- clicking returns the node
+   to the exact state that produced the current output. */
+.pc-exec-chip-seed {
+    color: var(--pc-seed);
+    background: color-mix(in srgb, var(--pc-seed) 12%, transparent);
+    border-color: color-mix(in srgb, var(--pc-seed) 40%, transparent);
+}
+
+/* The node ran but the executed string could not be fetched (stale
+   server process, missing route, network failure). Red like the
+   "(Missing)" family -- the tooltip names the cause and the fix. */
+.pc-exec-chip-error {
+    color: var(--pc-danger);
+    background: color-mix(in srgb, var(--pc-danger) 12%, transparent);
+    border-color: color-mix(in srgb, var(--pc-danger) 45%, transparent);
+}
+
+/* Round 40: the chip's lift comes from the shared .pc-pressable wash;
+   the old filter:hover was the card-text "brightness change" ghost. */
+
+/* Round 11: a drift chip still waiting for this machine's newer record
+   to land reads "Checking..." -- a soft pulse says "transient".
+   Round 41: the pulse is an inset wash, not opacity -- animating
+   opacity composites the chip and Chromium drops subpixel text AA
+   wherever that layer lives (the card-text brightness ghost). */
+.pc-exec-chip-checking {
+    animation: pc-chip-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes pc-chip-pulse {
+    0%, 100% { box-shadow: inset 0 0 0 999px rgba(255, 255, 255, 0); }
+    50% { box-shadow: inset 0 0 0 999px rgba(255, 255, 255, 0.30); }
+}
+
+/* Round 33: press-and-hold progress on the executed chips -- a steady
+   brightening says "keep holding" (duration must match HOLD_MS in
+   js/press_hold.js); finishing it accepts the current state and the
+   chip goes away with the class. Round 41: same message via a paint-
+   only wash flood (the old filter:keyframes pressed the ghost). */
+.pc-exec-chip-holding {
+    animation: pc-chip-hold 1s linear forwards;
+}
+
+@keyframes pc-chip-hold {
+    from { box-shadow: inset 0 0 0 999px rgba(255, 255, 255, 0); }
+    to { box-shadow: inset 0 0 0 999px rgba(255, 255, 255, 0.5); }
+}
+
+.pc-preview-label {
+    color: var(--pc-text-dim);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.pc-preview-text {
+    flex: 1 1 auto;
+    resize: none;
+    overflow-y: auto;
+    background: var(--pc-text-input);
+    border: 1px solid var(--pc-panel);
+    border-radius: 4px;
+    padding: 4px;
+    color: var(--pc-safe-light);
+    font-family: "SFMono-Regular", Consolas, monospace;
+    font-size: 11px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.pc-copy-btn {
+    padding: 3px 3px 3px 3px;
+    flex: 0 0 auto;
+}
+
+/* (The old "floating confirm overlay (image replace)" chrome --
+   .pc-confirm-overlay / -yes / -no -- died when the confirm dialogs
+   unified onto the backdrop+box dialog below; removed round 39.) */
+
+/* ---------- Reusable confirm/approval dialog (right-panel overlay) ---------- */
+
+.pc-confirm-overlay-backdrop {
+    position: absolute;
+    inset: 0;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.25);
+}
+
+.pc-confirm-box {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-width: 220px;
+    max-width: 320px;
+    background: var(--pc-panel);
+    border: 1px solid var(--pc-btn-border);
+    border-radius: 8px;
+    padding: 16px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+.pc-confirm-title {
+    font-weight: 600;
+    font-size: 13px;
+    color: var(--pc-text);
+}
+
+.pc-confirm-message {
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--pc-text-dim);
+}
+
+.pc-confirm-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 4px;
+}
+
+/* ---------------------------------------------------------------------------
+   Favorites
+
+   "Favorite" IS an ordinary category (see web/js/favorites.js), so it is
+   presented where categories live: as a SQUARE badge in the card's badge
+   row. On grid cards the badge row sits at the bottom of the thumbnail
+   (inside the hover overlay), so the star floats over that row's right
+   end; on list rows it flows as the FIRST badge under the name. Two
+   things share the shape: the interactive toggle on a Library prompt
+   card, and the passive indicator on a composer entry card, which
+   reports the state of the prompt the entry points at without offering
+   to change it.
+   ------------------------------------------------------------------------ */
+
+.pc-fav-star {
+    position: absolute; /* the grid default; the list variant goes static */
+    z-index: 3;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+    padding: 0;
+    /* The star wears the pill's skin verbatim: .pc-badge's 70% tag
+       ground, its 2px radius, its text colour -- no rim, so it reads
+       as a badge of the category row, not as chrome. State rides in
+       the glyph and the halo (see .pc-fav-on), not in the frame. */
+    border: none;
+    border-radius: 2px;
+    background: color-mix(in srgb, var(--pc-tag) 70%, transparent);
+    color: var(--pc-text);
+    cursor: pointer;
+    box-sizing: border-box;
+    /* Hidden by default; see the reveal rule below. `visibility` rather
+       than opacity alone because it also takes the star out of the tab
+       order and stops it swallowing a click while invisible -- and since
+       it is not interpolable, transitioning it keeps the star visible for
+       the whole fade-OUT and only flips at the end. */
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.12s ease, visibility 0.12s ease, color 0.12s ease, background 0.12s ease, box-shadow 0.12s ease;
+}
+
+/* Grid card: the star rides the badge row's RIGHT END without being in
+ * it -- floating at bottom-right of the thumb, sharing the pills' 6px
+ * floor, so the hover overlay sliding in underneath hands over
+ * seamlessly and the resting state still shows without a hover. The old
+ * top-center chip is retired: the thumb's top corners belong to the
+ * options button and the selection checkbox; the bottom corners to
+ * nobody. */
+.pc-fav-star-grid {
+    top: auto;
+    left: auto;
+    right: 6px;
+    bottom: 6px;
+    transform: none;
+}
+
+/* Room reserved in the overlay's badge row so the "+N" pill never ends
+ * up underneath the star. */
+.pc-entry-image-wrap:has(> .pc-fav-star) .pc-entry-overlay-badges {
+    padding-right: 18px;
+}
+
+/* List row: in flow, the first badge of the row under the name -- same
+ * 14px square, same pill skin as the grid variant, sitting at the
+ * pills' own level and height. Invisible means GONE: display:none
+ * leaves the flex row, the pills sit flush left, and the revealed
+ * star pushes them right as it arrives. That push is the point
+ * (round 58 restored it after one round of motionless fade-in) --
+ * and it is safe because the pills were fitted as if the star's box
+ * already existed (pinnedStar/FAV_PIN_W in badge_fit): the space the
+ * star claims on reveal is space the plan conceded from the start.
+ * The honest cost, accepted knowingly: a clipped LAST badge re-
+ * tightens its ellipsis slightly while hovered. */
+.pc-fav-star-list {
+    position: static;
+    display: none;
+}
+
+.pc-fav-star-list.pc-fav-on,
+.pc-entry-card:hover .pc-fav-star-list,
+.pc-entry-row:hover .pc-fav-star-list {
+    display: inline-flex;
+}
+
+/* Rows that CARRY a star -- Library rows, which hold the toggle control
+   and always build the badge row -- reserve its height up front in every
+   state, so the push is horizontal-only and no row grows and jitters its
+   neighbours as the pointer crosses. The real class: callers override
+   buildOverflowBadgeRow's default (see round 52's note). */
+.pc-library-card-badges:has(> .pc-fav-star) {
+    min-height: 14px;
+}
+
+/* The reveal. A favourited prompt's star is always shown -- that is state
+   the person set on purpose and wants to scan for across a grid of
+   thumbnails. An unfavourited one says nothing, so it stays out of the
+   picture until the card is hovered, exactly like the edit button beside
+   it. Hovering the star necessarily means hovering the card, so the
+   control is never reachable while invisible. */
+.pc-fav-star.pc-fav-on,
+.pc-entry-card:hover .pc-fav-star,
+.pc-entry-row:hover .pc-fav-star {
+    opacity: 1;
+    visibility: visible;
+}
+
+/* No hover means no way to reveal an unfavourited star, which would leave
+   a touch user able to REMOVE a favourite but never to ADD one -- the star
+   is the only favourite toggle there is. So on such devices every star
+   stays put, favourited or not: the visual noise is the price of the
+   control existing at all.
+   `hover: none` tests the PRIMARY input, which is the right question here;
+   `any-hover: none` would be stricter and wrongly hide the star on a
+   touchscreen laptop that happens to have a mouse attached.
+   Placed after the base rule on purpose -- a media query adds no
+   specificity, so `.pc-fav-star` here only wins over `.pc-fav-star` there
+   by coming later. */
+@media (hover: none) {
+    .pc-fav-star {
+        opacity: 1;
+        visibility: visible;
+    }
+    .pc-fav-star-list {
+        display: inline-flex;
+    }
+}
+
+/* On = the badge lights up gold: the glyph takes the filter chip's
+ * gold, and a soft halo rides over the pill skin the star already
+ * wears -- state in the light, not in the frame. */
+.pc-fav-star.pc-fav-on {
+    color: var(--pc-gold);
+    box-shadow: 0 0 6px color-mix(in srgb, var(--pc-gold) 30%, transparent);
+}
+
+/* Off, hovered: pale gold only -- the skin does not darken; the row
+ * hover already lights up its own background. */
+.pc-fav-star:not(.pc-fav-on):hover {
+    color: var(--pc-gold-pale);
+}
+
+/* The passive variant on entry cards: no affordance at all, so a click
+   goes to the card underneath it (which is the entry's own toggle) rather
+   than to a control that looks like the Library's. */
+.pc-fav-indicator {
+    cursor: default;
+    pointer-events: none;
+}
+
+/* The star beside a "filter by category" dropdown. */
+.pc-fav-filter-btn {
+    color: var(--pc-text-dim);
+    flex: 0 0 auto;
+}
+
+.pc-fav-filter-btn:hover {
+    color: var(--pc-gold-pale);
+}
+
+.pc-fav-filter-btn.pc-fav-on {
+    background: var(--pc-gold-deep);
+    border-color: var(--pc-gold-line);
+    color: var(--pc-gold);
+}
+
+.pc-fav-filter-btn.pc-fav-on:hover {
+    background: var(--pc-gold-line);
+    color: var(--pc-gold-pale);
+}
+
+/* --------------------------------------------------------------------------
+ * Full-resolution thumbnail tooltip (round 20, js/thumb_preview.js).
+ * Mounted on document.body (outside every panel) and positioned in
+ * viewport coordinates off the live pointer -- hence position:fixed, the
+ * high z-index (above in-node overlays like the 9999 dialogs) and
+ * pointer-events:none so the floating card can never swallow a click or
+ * re-trigger itself. display is toggled by the controller, so the
+ * display:none here is the resting state. The img renders at its NATURAL
+ * size (the stored PNG is the clean 256px full-res asset); the max-*
+ * caps only guard pathological viewports.
+ * ------------------------------------------------------------------------ */
+.pc-thumb-preview {
+    position: fixed;
+    left: 0;
+    top: 0;
+    z-index: 10000;
+    display: none;
+    padding: 5px;
+    background: var(--pc-panel-deep);
+    border: 1px solid var(--pc-btn-border);
+    border-radius: 6px;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.6);
+    pointer-events: none;
+}
+
+.pc-thumb-preview-img {
+    display: block;
+    max-width: min(480px, 45vw);
+    max-height: 45vh;
+    border-radius: 3px;
+}
