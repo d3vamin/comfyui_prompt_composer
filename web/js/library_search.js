@@ -1,12 +1,12 @@
 /**
- * library_search.js -- the Library query engine (round 34).
+ * library_search.js -- the Library query engine.
  *
  * Everything about WHICH prompts a search text selects, in what order,
  * and how the hits are rendered lives here as pure functions. The DOM
  * side (ComposerUI.filterLibraryEntries) only APPLIES a result:
  * show/hide, reorder, highlight, count.
  *
- * Matching is WORD-AND (round 34, replacing the single substring):
+ * Matching is WORD-AND (not a single substring):
  * every whitespace-separated token must appear somewhere in the
  * entry's haystack (name + categories + prompt, case-folded). So
  * "red hair" finds "red-haired small cat" -- the old one-blob
@@ -37,7 +37,7 @@ export function searchBlob(entry) {
 }
 
 /**
- * Section-entry variant (round 35): a section row displays a LIBRARY
+ * Section-entry variant: a section row displays a LIBRARY
  * prompt (resolved `display`) or a dead pointer, and the prompt_ref
  * itself stays searchable -- it is the only place the UID half of the
  * name survives, and the uid is what a "(Missing)" tooltip shows.

@@ -9,17 +9,16 @@ presets, and queue-time randomization.
 This file registers the node with ComfyUI and mounts the extra server
 routes used by the in-node UI (library CRUD, resolve, preset CRUD).
 
-Storage note: prompt content lives entirely as PNG files under
-./library, each independently drag-and-droppable back into ComfyUI --
-see comfyUI_Prompt_composer.md for the full design and the
-Implementation Roadmap section for build status/order.
+Storage note: prompt content lives entirely as PNG files in the
+user data folder (ComfyUI/user/prompt_composer/library), each
+independently drag-and-droppable back into ComfyUI.
 """
 
 from .prompt_composer_node import PromptComposerNode
 
 # MAJOR.MINOR.PATCH -- the only home for the product version; the node
 # name is plain "Prompt Composer" and never carries it.
-__version__ = "0.1.0"
+__version__ = "1.0.261007"
 
 NODE_CLASS_MAPPINGS = {
     "PromptComposer": PromptComposerNode,

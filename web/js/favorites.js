@@ -149,7 +149,7 @@ export function buildFavoriteStar({ favorite, onToggle, placement = "grid", titl
         node.innerHTML = svgIcon("star", 12, favorite ? "currentColor" : "none");
         return node;
     }
-    // Round 43: the interactive star goes through the toggle factory --
+    // The interactive star goes through the toggle factory --
     // starOn/star are the SAME path with/without a baked fill, so the
     // silhouette never shifts, .pc-fav-on rides onClass, and applyState
     // can flip a live star without rebuilding its card. noHover: the
@@ -187,10 +187,10 @@ export function buildFavoriteStar({ favorite, onToggle, placement = "grid", titl
  * @returns {HTMLElement}
  */
 export function buildFavoriteFilterButton({ active, onChange }) {
-    // Round 43: the toggle factory -- same starOn/star pair as the
+    // The toggle factory -- same starOn/star pair as the
     // card star, .pc-fav-on via onClass, and applyState so a host can
     // flip the button LIVE (the section panel rides its in-place
-    // filter pass -- clicking this no longer rebuilds anything). The
+    // filter pass -- clicking this rebuilds nothing). The
     // verdict is read from the button's own class at click time: a
     // closure over the build-time `active` would go stale the moment
     // the button survives its first click.
@@ -207,4 +207,88 @@ export function buildFavoriteFilterButton({ active, onChange }) {
         onClick: () => onChange(!btn.classList.contains("pc-fav-on")),
     });
     return btn;
+}
+
+// -- Folder-derived pseudo-categories ---------------------------------
+//
+// Shares this module for the SAME reason Favorite does (see the module
+// docstring): both ui_library.js and ui_panels.js need it, and neither
+// may import the other.
+//
+// A subfolder in the library gets a pseudo-category badge/filter entry
+// -- "📁 Outfits" for a subfolder named "Outfits" -- WITHOUT it ever
+// being an embedded tag: it is derived purely from where the file lives
+// on disk (entry.folder, set by server library_store.scan_library),
+// never written into entry.category, never persisted to
+// _categories.json. FOLDER_CATEGORY_PREFIX MUST match
+// FOLDER_CATEGORY_PREFIX in server/library_store.py exactly; the server
+// is the actual source of truth for the reservation (is_reserved_
+// category_name rejects any real category name starting with it), this
+// is only the display-side copy used to recognize/derive one client-side.
+
+export const FOLDER_CATEGORY_PREFIX = "\u{1F4C1} "; // "📁 "
+
+/** The display badge/dropdown-option name for a subfolder, e.g.
+ * "Outfits" -> "📁 Outfits". Mirrors server
+ * library_store.folder_pseudo_category_name() exactly. */
+export function folderPseudoCategoryName(folder) {
+    return `${FOLDER_CATEGORY_PREFIX}${folder}`;
+}
+
+/** True for a category STRING that is a folder-derived pseudo-category
+ * (as opposed to a real, user-managed one). */
+export function isFolderPseudoCategory(category) {
+    return typeof category === "string" && category.startsWith(FOLDER_CATEGORY_PREFIX);
+}
+
+/** The badge list a prompt CARD should show: its real (non-Favorite)
+ * categories, plus its folder's pseudo-category prepended when it has
+ * one -- so a card sitting inside a library subfolder visibly shows
+ * that folder as a badge, the same way it shows any other tag, without
+ * folder ever becoming a real, embedded, user-editable category (see
+ * this module's own header comment). Folder-first ordering matches
+ * where a person's eye tends to look for "where does this live" before
+ * "what else is it tagged".
+ *
+ * Favorite is DELIBERATELY excluded (withoutFavorite): a card already
+ * shows it as its own star icon, so a "Favorite" badge here would
+ * print the same fact twice. This makes categoryBadgesFor the right
+ * choice for building what a card VISUALLY DISPLAYS, but the WRONG
+ * choice for anything that needs to know "is this entry a member of
+ * category X" for filtering/matching purposes (a category dropdown's
+ * "Favorite" option has to keep matching entries tagged Favorite) --
+ * use categoryMembershipFor for that instead.
+ *
+ * @param {object} entry - a resolved/display library entry ({category, folder})
+ */
+export function categoryBadgesFor(entry) {
+    const real = withoutFavorite(entry && entry.category);
+    if (entry && entry.folder) {
+        return [folderPseudoCategoryName(entry.folder), ...real];
+    }
+    return real;
+}
+
+/** Every category name an entry should be considered a MEMBER of, for
+ * filtering/searching purposes: its real embedded categories (Favorite
+ * INCLUDED, unlike categoryBadgesFor -- selecting "Favorite" from a
+ * category dropdown has to keep matching a Favorite-tagged entry even
+ * though the card doesn't print a redundant "Favorite" badge) plus its
+ * folder's pseudo-category when it has one.
+ *
+ * This is what belongs in a `dataset.categories`-style stamp that a
+ * live filter reads back (_applyLibraryRow / _applySectionRow), and in
+ * populateLibraryCategorySelect's / populateSectionCategorySelect's own
+ * per-entry counting loop -- both need "what can this entry match",
+ * which is a strictly LARGER set than "what badge should this entry's
+ * card print" (categoryBadgesFor).
+ *
+ * @param {object} entry - a resolved/display library entry ({category, folder})
+ */
+export function categoryMembershipFor(entry) {
+    const real = (entry && entry.category) || [];
+    if (entry && entry.folder) {
+        return [folderPseudoCategoryName(entry.folder), ...real];
+    }
+    return real;
 }

@@ -26,12 +26,12 @@
 
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
-import { el, fileToDataUrl, ScrollPreserver } from "./js/dom_utils.js";
+import { el, fileToDataUrl, ScrollPreserver, uuid } from "./js/dom_utils.js";
 import { ChunkedFiller } from "./js/chunked_fill.js";
 import { attachThumbPreview } from "./js/thumb_preview.js";
 import { svgIcon } from "./js/icons.js";
 import { uiBtn, uiToggle, buildSearchBox, modeNotice } from "./js/ui_chrome.js";
-import { ComposerState, makeLockedPromptSection } from "./js/composer_state.js";
+import { ComposerState, makeLockedPromptSection, usedPromptRefsForQueue } from "./js/composer_state.js";
 import { LibraryController } from "./js/ui_library.js";
 import { PreviewController } from "./js/ui_preview.js";
 import { PresetToolbar, renderSectionToolbar } from "./js/ui_toolbars.js";
@@ -71,8 +71,10 @@ import {
     sortCategoriesPinningFavorite,
     buildFavoriteFilterButton,
     buildFavoriteStar,
+    categoryMembershipFor,
+    isFolderPseudoCategory,
 } from "./js/favorites.js";
-import { planLibrarySync, planPlacements, isRowFresh } from "./js/library_sync.js";
+import { planLibrarySync, planPlacements, isRowFresh, categoryStampKey } from "./js/library_sync.js";
 import { tokenize, rankEntries, highlightHTML, searchBlob, scoreEntry } from "./js/library_search.js";
 import { bindPressAndHold } from "./js/press_hold.js";
 import * as apiClient from "./js/api_client.js";
@@ -201,7 +203,7 @@ const PC_MAX_SNAPSHOT_CONTENTS_CHARS = 200 * 1024;
 
 /**
  * Best-effort display name of the workflow being saved, used to name the
- * Layer-B virtual preset. The workflow manager's public surface has
+ * virtual preset. The workflow manager's public surface has
  * moved across frontend versions, so probe defensively and never throw:
  * a null name just means the snapshot has no suggested preset name.
  * Names arrive with directories and/or the ".json" suffix attached
@@ -233,7 +235,7 @@ function currentWorkflowName() {
 }
 
 /**
- * Layer C3 plumbing shared by all PromptComposer nodes.
+ * the executed-output plumbing shared by all PromptComposer nodes.
  *
  * PC_NODES holds the LIVE node instances (added at onNodeCreated,
  * dropped at onRemoved) so the execution listeners below can find every
@@ -266,6 +268,27 @@ let _pcWsWired = false;
 let _pcC3FailureLogged = false;
 let _pcEndpointProbed = false;
 let _pcPollTimer = null;
+// Adaptive poll cadence (see startExecutedOutputPolling): fast while
+// runs are landing, slow once the page has been idle for a while.
+let _pcPollIntervalMs = 0;
+let _pcLastAdoptAt = 0;
+const PC_POLL_FAST_MS = 2500;
+const PC_POLL_IDLE_MS = 10000;
+const PC_POLL_IDLE_AFTER_MS = 60000;
+// This page's executed-output disambiguator: one random string per PAGE LOAD,
+// mirrored into each node's hidden client_key widget and sent with every
+// executed-output fetch. Node ids restart at 1 in every workflow, so
+// without it two browser tabs write to -- and adopt from -- the same
+// server stash address. Deliberately NOT persisted: two tabs showing the
+// SAME saved workflow must still get different keys.
+const PC_CLIENT_KEY = uuid();
+
+// The literal text of the preview toggle label -- built once into one
+// span per character (see the previewLabel construction) so the ON
+// state can color each letter independently. A plain constant rather
+// than reading previewLabel.textContent back out, since that becomes
+// "" the moment the per-letter spans replace it.
+const PREVIEW_LABEL_TEXT = "PREVIEW";
 
 function wireExecutedOutputListeners() {
     if (_pcWsWired) return;
@@ -304,6 +327,10 @@ function wireExecutedOutputListeners() {
  * load is also proof the browser is running the fixed JS.
  */
 function probeC3EndpointOnce() {
+    // The polling restart is deliberately OUTSIDE the once-guard: the
+    // poller stops itself when the last composer leaves the page, so
+    // creating a node again has to be able to bring it back.
+    startExecutedOutputPolling();
     if (_pcEndpointProbed) return;
     _pcEndpointProbed = true;
     apiClient.getC3Status().catch((err) => {
@@ -312,7 +339,6 @@ function probeC3EndpointOnce() {
             if (!node._pcDestroyed && node.composerUI) node.composerUI.noteC3EndpointDown(msg);
         }
     });
-    startExecutedOutputPolling();
 }
 
 /**
@@ -322,31 +348,33 @@ function probeC3EndpointOnce() {
  * console SEARCH for "Prompt Composer" either shows it (fresh JS) or
  * doesn't (stale page). One line per load; remove once nobody asks.
  */
-// Product version -- must mirror __version__ in the root __init__.py
-// (JS cannot import Python; the pairing is checked by convention, and
-// the node name itself never carries a version).
-const PC_VERSION = "0.1.0";
-const PC_BUILD = "c3r67";
+// Product version. The authority is __version__ in the root
+// __init__.py, served by GET /prompt_composer/version -- this constant
+// is only the value shown until that answer lands (and the fallback if
+// it never does). It is deliberately not a hand-maintained copy of
+// the version.
+let PC_VERSION = "1.0.261007";
+const PC_BUILD = "e3r70";
 
-// Round 34: how long the library search waits for typing to stop before
+// How long the library search waits for typing to stop before
 // running the (heavier) rank + reorder + highlight pass. 180ms: half a
 // keystroke's reaction time, full keystrokes in a normal flow.
 const LIB_SEARCH_DEBOUNCE_MS = 180;
 
-// Round 35: the text elements each panel's rows expose to hit
+// The text elements each panel's rows expose to hit
 // marking. Deliberately different lists -- a section card nests its
 // name in a SPAN beside badges (marking the wrapper would shred them),
 // a library card puts the text straight in the label div.
 const LIB_ROW_TEXT = [".pc-entry-label", ".pc-entry-row-name", ".pc-entry-row-prompt"];
 const SECTION_ROW_TEXT = [".pc-entry-label-name", ".pc-entry-row-prompt"];
-// Round 31: sentinel stored in the hidden executed_prompt widget for a
+// Sentinel stored in the hidden executed_prompt widget for a
 // LEGITIMATELY EMPTY executed string. NUL is untypable, so it can never
 // collide with real prompt text -- and unlike "", it stays
 // distinguishable from a brand-new node's default widget value.
 const PC_EMPTY_EXECUTED_MARK = "\u0000";
 
 /**
- * The UNIVERSAL C3 path: a slow poll of /c3_status, which needs NO WS
+ * The UNIVERSAL executed-output path: a slow poll of /c3_status, which needs NO WS
  * events at all. The live smoke proved events can vary by build (this
  * user's browser delivered neither my "executed" listener nor
  * LiteGraph's onExecuted) -- but /c3_status answered perfectly, so
@@ -355,22 +383,48 @@ const PC_EMPTY_EXECUTED_MARK = "\u0000";
  * node has not already adopted. The birth-baseline is what makes this
  * safe across graphs: node ids restart from 1 in every new workflow
  * while the stash outlives them, so without it the first node of a new
- * graph would "inherit" an old run recorded under the same id (round-8
- * bug the user caught: an amber "edited since" chip on a node that had
- * never run). The onExecuted/WS fast paths remain for instant updates
+ * graph would "inherit" an old run recorded under the same id (showing an
+ * amber "edited since" chip on a node that had never run). The onExecuted/WS fast paths remain for instant updates
  * where events do fire; a duplicate adopt is idempotent.
  */
-function startExecutedOutputPolling() {
-    if (_pcPollTimer) return;
+function stopExecutedOutputPolling() {
+    if (!_pcPollTimer) return;
+    clearInterval(_pcPollTimer);
+    _pcPollTimer = null;
+    _pcPollIntervalMs = 0;
+}
+
+function startExecutedOutputPolling(intervalMs = PC_POLL_FAST_MS) {
+    if (_pcPollTimer && _pcPollIntervalMs === intervalMs) return;
+    stopExecutedOutputPolling();
+    _pcPollIntervalMs = intervalMs;
     _pcPollTimer = setInterval(async () => {
         const nodes = [];
         for (const node of PC_NODES) {
             if (!node._pcDestroyed && node.composerUI) nodes.push(node);
         }
-        if (!nodes.length) return;
+        if (!nodes.length) {
+            // Every composer is gone (deleted, or the graph was cleared).
+            // Nothing is left to adopt an answer, so stop asking -- otherwise
+            // the timer would poll a dead page forever. The next node
+            // created restarts it (see probeC3EndpointOnce's caller).
+            stopExecutedOutputPolling();
+            return;
+        }
+        // Back off once nothing has been adopted for a while: the fast
+        // cadence only earns its keep around an actual run.
+        const idle = _pcLastAdoptAt && (Date.now() - _pcLastAdoptAt) > PC_POLL_IDLE_AFTER_MS;
+        const wanted = idle ? PC_POLL_IDLE_MS : PC_POLL_FAST_MS;
+        if (wanted !== _pcPollIntervalMs) {
+            startExecutedOutputPolling(wanted);
+            return;
+        }
         let status = null;
         try {
-            status = await apiClient.getC3Status();
+            // Bodies included: this is the call that ADOPTS, so it is the
+            // one that legitimately asks for the full text (the server
+            // omits it by default -- see /c3_status).
+            status = await apiClient.getC3Status({ full: true });
         } catch {
             return; // endpoint problems were voiced by the boot probe
         }
@@ -397,11 +451,12 @@ function startExecutedOutputPolling() {
                     nodeId: node.id,
                     baselineAt: ui._pcBaselineAt,
                     adoptedAt: ui._pcAdoptedAt,
+                    clientKey: PC_CLIENT_KEY,
                 });
                 if (ok && (!mine || ok.at > mine.at)) mine = ok;
             }
             if (!mine) {
-                // Round 11: this tick had its chance at newer data and
+                // This tick had its chance at newer data and
                 // found none for this node -- the embedded record IS the
                 // latest truth here, so any pending "Checking..." state
                 // resolves back to the honest Edited/Reset Seed labels.
@@ -412,6 +467,7 @@ function startExecutedOutputPolling() {
                 continue;
             }
             ui._pcAdoptedAt = mine.at;
+            _pcLastAdoptAt = Date.now(); // keeps the fast cadence alive
             console.info(`Prompt Composer C3: adopted executed output for node ${node.id} via status poll`);
             ui.applyExecutedOutput(mine);
         }
@@ -455,7 +511,7 @@ function warnExecutedFetchFailure(err, nodeId, promptId) {
 }
 
 /**
- * Round 15: a prompt rename moves its ref (UID = hash(name+text)), and
+ * A prompt rename moves its ref (UID = hash(name+text)), and
  * the server now relinks every saved PRESET FILE -- but live nodes
  * still hold their loaded preset in MEMORY, and rewriteEntryPromptRefs
  * only reaches the one instance that performed the edit. Every other
@@ -464,7 +520,7 @@ function warnExecutedFetchFailure(err, nodeId, promptId) {
  * relinked file. So the rename answer is applied through the PC_NODES
  * registry to every live node: refs swapped, display cache dropped,
  * preview memo invalidated, re-rendered. The preset toolbar's dirty
- * baseline is retargeted too (round 15b): the relink is not a user
+ * baseline is retargeted too: the relink is not a user
  * edit, and the server already rewrote the on-disk copy, so Save must
  * NOT light up green over it.
  */
@@ -485,6 +541,33 @@ function relinkLiveNodes(oldRef, newRef) {
         if (ui.preview) ui.preview.invalidate([oldRef, newRef]);
         try { ui.render(); } catch { /* a torn-down instance just fails over */ }
     }
+}
+
+/**
+ * Strip the underscore-prefixed, UI-runtime-only fields renderEntryGrid
+ * attaches to a LIVE section object while the entry list is open:
+ * _moveEntryCallback (a closure, used by drag-reorder), and
+ * _selectedEntryIds / _missingEntryIds (Sets shared by reference with
+ * the ComposerUI instance, used by bulk-select and cross-section drag).
+ * None of the three is meant to be persisted or handed to anything
+ * outside the live UI -- they are re-derived every time the entry list
+ * renders. Every consumer that hands `sections` to something LiteGraph
+ * or the server might clone/serialize (onSerialize's pc_state,
+ * buildWorkflowSnapshot's embedded preset.sections) MUST call this
+ * first: a still-attached _moveEntryCallback is a function, which
+ * structuredClone cannot copy, and is exactly what produced "LiteGraph:
+ * ignoring non-serializable extension payload" in the console --
+ * repeatedly, on every one of LiteGraph's routine internal
+ * serialization passes (which run far more often than an explicit
+ * save, including during canvas panning) for as long as a section
+ * (never the library view, which never attaches these) stayed active
+ * with the entry list mounted.
+ */
+function stripTransientSectionFields(sections) {
+    return sections.map((section) => {
+        const { _moveEntryCallback, _selectedEntryIds, _missingEntryIds, ...clean } = section;
+        return clean;
+    });
 }
 
 class ComposerUI {
@@ -516,7 +599,7 @@ class ComposerUI {
         // display; the PreviewController holds its own copy for the
         // preview text (see applyWorkflowSnapshot).
         this._workflowContents = null;
-        // Round 26: backing store for the "!" alert chips -- one entry
+        // Backing store for the "!" alert chips -- one entry
         // per prompt_ref: "live" | "workflow" | "missing". Fed two ways:
         // the per-section fill fast path (free -- it reuses the merged
         // resolve the cards were built from) and a whole-preset sweep
@@ -526,14 +609,14 @@ class ComposerUI {
         this._alertSweptWorkflow = null;
         this._alertSweepInFlight = false;
         this._alertSweepQueued = false;
-        // Round 27: the alert chip's toggle -- which section (if any) is
+        // The alert chip's toggle -- which section (if any) is
         // currently isolating its problem cards: null | a section id.
         // One select, like the visible-only flag: arming another chip
-        // moves the ring. (Round 28 retired the "library" global scope
-        // along with the Library row's chip.)
+        // moves the ring. (There is no "library" global scope: the
+        // Library row has no chip.)
         this.alertsOnlyMode = null;
         this._displayCache = new Map(); // prompt_ref -> resolved display data, for entry grid/list rendering
-        this.sectionSearchVisible = false; // per-spec: Search toolbar visibility is toggled, hidden by default
+        this.sectionSearchVisible = false; // Search toolbar visibility is toggled, hidden by default
         this.sectionSearchText = ""; // search text for filtering entries WITHIN the active custom section
         this.sectionSelectedCategory = "All"; // category filter for entries WITHIN the active custom section
         // Star modifier on that category filter, mirroring
@@ -542,8 +625,7 @@ class ComposerUI {
         // already chosen. Transient view state like the rest of the
         // filters -- never persisted into the preset.
         this.sectionFavoritesOnly = false;
-        // The section rows' "N/M" counter (round 21, replacing round 16's
-        // eyescan button): a VIEW filter that hides the section's
+        // The section rows' "N/M" counter: a VIEW filter that hides the section's
         // visibility-OFF cards (entry.visible === false, the dimmed ones)
         // from the panel entirely, so what remains on screen is exactly
         // what this section composes. It changes no state -- hiding a
@@ -552,7 +634,7 @@ class ComposerUI {
         // filters: never persisted.
         this.sectionVisibleOnly = false;
         // The bulk toolbar's "N selected" chip doubles as a VIEW filter
-        // (round 17): clicking it hides every card that is NOT currently
+        // (clicking it hides every card that is NOT currently
         // selected, so the panel shows exactly the selection the bar is
         // describing. Section cards key off the .pc-selected class (this panel's
         // selectedEntryIds); the Library browser keys off its own selection
@@ -562,10 +644,10 @@ class ComposerUI {
         // flag, and is never persisted, exactly like the visible-only filter.
         this.sectionSelectedOnly = false;
         this.librarySelectedOnly = false;
-        this.libraryColor = "#4a90d9"; // "Library" pseudo-section's only property (per spec, default Blue); persisted via onSerialize/onConfigure
+        this.libraryColor = "#4a90d9"; // "Library" pseudo-section's only property (default Blue); persisted via onSerialize/onConfigure
         this.librarySearchVisible = false; // toggle for library search + category filters
         this._scrollPreserver = new ScrollPreserver();
-        // Round 23: a section id here means "the NEXT time that
+        // A section id here means "the NEXT time that
         // section's browse view renders, pin it to the BOTTOM instead of
         // restoring memory" -- appended entries (library add, paste,
         // drag-and-drop) land at the end, and the new card is the thing
@@ -575,7 +657,7 @@ class ComposerUI {
         // section comes back on screen. Consumed once by render()'s
         // override, below the edit/library guards.
         this._browseToEndSectionId = null;
-        // Round 24 companion: a section id here means the next render of
+        // Companion to the above: a section id here means the next render of
         // ITS browse view restores the remembered position as a
         // PERCENTAGE of the scrollable range instead of the exact pixel
         // offset -- used when a cross-section MOVE shortens the list
@@ -599,7 +681,7 @@ class ComposerUI {
         this._addingToSection = null; // { sectionId } | null
 
         this.root = el("div", "pc-root");
-        // Full-resolution thumbnail tooltip (round 20, see
+        // Full-resolution thumbnail tooltip (see
         // js/thumb_preview.js): delegated on the whole root so every
         // thumbnail in every panel — grid cards AND list rows, sections
         // AND library — gets it, including ones chunked-fillers mount
@@ -612,7 +694,7 @@ class ComposerUI {
         // the right panel is torn down (see clearRightPanel).
         this._libFiller = null;
         this._libRenderedRefs = null;
-        // Round 34: live search state. The debounced pass re-ranks,
+        // Live search state. The debounced pass re-ranks,
         // highlights and summarizes the MOUNTED rows via CSS order --
         // the DOM itself never moves, so there is no "restore order"
         // debt to track. The input ref lets the "/" hotkey find the
@@ -621,7 +703,7 @@ class ComposerUI {
         this._libSearchInput = null;
         this._libSearchCount = null;
         this._libEmptyNode = null;
-        // Round 35: the same five facts for the SECTION panel. The
+        // The same five facts for the SECTION panel. The
         // index maps entry id -> {name, prompt, category} built from
         // the very resolve that renders the rows (scorer sees exactly
         // what the cards show); it lives on the instance because the
@@ -631,7 +713,7 @@ class ComposerUI {
         this._secSearchCount = null;
         this._secEmptyNode = null;
         this._secSearchIndex = null;
-        // Round 34: "/" focuses the library search from anywhere --
+        // "/" focuses the library search from anywhere --
         // the standard summon key. Guarded so it stays silent while the
         // user types in ANY field, and while this node owns no visible
         // search strip: every composer instance listens, but only one
@@ -640,7 +722,7 @@ class ComposerUI {
             if (e.key !== "/" || e.ctrlKey || e.metaKey || e.altKey) return;
             const t = e.target;
             if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
-            // Round 35: either panel's field answers -- whichever strip
+            // Either panel's field answers -- whichever strip
             // is actually on screen (the two panels never are at once).
             let input = null;
             for (const candidate of [this._libSearchInput, this._secSearchInput]) {
@@ -686,6 +768,11 @@ class ComposerUI {
         // Monotonic render identity (see the fill chain in render()):
         // whose promises still speak for the panel.
         this._renderSeq = 0;
+        // See render()'s tail: replaced with a real promise on every
+        // render, but defined from construction so a caller that runs
+        // before the very first render (shouldn't happen in practice)
+        // still has something safe to await.
+        this._lastRenderSettled = Promise.resolve();
         this._starPending = new Set(); // refs with a favourite PATCH in flight
 
         this.buildStaticLayout();
@@ -731,7 +818,7 @@ class ComposerUI {
         this.body = el("div", "pc-body");
         this.leftPanel = el("div", "pc-left-panel");
         // Section toolbar sits permanently at the top of the left
-        // panel, above the section list itself, per spec ("Left
+        // panel, above the section list itself ("Left
         // Panel... Contain: Section toolbar at top. A vertical list
         // container for section row cards. Add section button.").
         // It's appended here once and left alone; renderLeftPanel()
@@ -748,12 +835,75 @@ class ComposerUI {
 
         this.previewBar = el("div", "pc-preview");
         const previewHeader = el("div", "pc-preview-header");
-        const previewLabel = el("div", "pc-preview-label", { text: "PREVIEW" });
+        // The colorized-preview toggle lives ON the "PREVIEW" label
+        // itself (reusing the existing toggle-button pattern
+        // rather than adding a second control). OFF looks exactly like
+        // a plain label; ON repaints both this label's own
+        // letters (rainbow, see _applyPreviewLabelColors) and the
+        // preview text below (per-section color, see
+        // _renderColorizedPreview) -- and stays live as section colors
+        // change, since both repaints run again on every render().
+        this.previewColorOn = false;
+        const previewLabelTitleOn = "Showing preview in section colors -- click to turn off";
+        const previewLabelTitleOff = "Click to show the preview in each section's color";
+        this.previewLabel = uiToggle({
+            on: false,
+            text: "PREVIEW",
+            bare: true,
+            extra: "pc-preview-label",
+            titleOn: previewLabelTitleOn,
+            titleOff: previewLabelTitleOff,
+            onClick: () => {
+                this.previewColorOn = !this.previewColorOn;
+                this.previewLabel.classList.toggle("pc-on", this.previewColorOn);
+                // uiToggle only resolves titleOn/titleOff once, AT BUILD
+                // TIME (applyState -- which would keep this live -- is
+                // only wired up when iconOn/iconOff are given, and this
+                // toggle has neither: it's text+per-letter spans, not an
+                // icon). Flip it here so the tooltip still tracks state.
+                this.previewLabel.title = this.previewColorOn ? previewLabelTitleOn : previewLabelTitleOff;
+                // Preserve the textarea's own scroll position explicitly
+                // across the toggle rather than assuming it survives on
+                // its own: flipping .pc-preview-colorized-active changes
+                // the textarea's computed `color` (transparent<->real)
+                // and the overlay's `display` (none<->block) in the same
+                // paint, and at least some engines can reflow/reset a
+                // scrollable text control's scrollTop when its own
+                // rendering characteristics change like that even though
+                // its actual text and box size never do. Capturing
+                // before and restoring after makes the toggle scroll-
+                // neutral regardless of whether that reflow happens.
+                const preservedScrollTop = this.previewText.scrollTop;
+                const preservedScrollLeft = this.previewText.scrollLeft;
+                this._refreshPreviewColorState();
+                this.previewText.scrollTop = preservedScrollTop;
+                this.previewText.scrollLeft = preservedScrollLeft;
+                // _renderColorizedPreview() already re-syncs the overlay
+                // to previewText.scrollTop once, but that happened
+                // BEFORE the restore two lines up -- sync it again now
+                // that the textarea is back where it started.
+                this.previewColorLayer.scrollTop = this.previewText.scrollTop;
+                this.previewColorLayer.scrollLeft = this.previewText.scrollLeft;
+            },
+        });
+        // uiBtn(text:...) sets textContent, which would leave "PREVIEW"
+        // as one un-splittable text node -- rebuild it as one span per
+        // letter (spaces included, as empty-content spacers) so the
+        // rainbow state can color each letter independently. Static:
+        // built once here, never rebuilt, so a render() storm can't
+        // thrash seven span elements pointlessly -- only their color
+        // is ever touched afterward (_applyPreviewLabelColors).
+        this.previewLabel.textContent = "";
+        this._previewLabelLetterEls = [...PREVIEW_LABEL_TEXT].map((ch) => {
+            const span = el("span", "pc-preview-label-letter", { text: ch === " " ? "\u00a0" : ch });
+            this.previewLabel.appendChild(span);
+            return span;
+        });
         const btnCopy = uiBtn({ icon: "copy", size: 14, iconOnly: false, extra: "pc-copy-btn", title: "Copy to clipboard", onClick: () => navigator.clipboard.writeText(this.previewText.value) });
 
         const spacer = el("div", "pc-preview-header-spacer");
-        // Layer C3's face in the UI: two independent action chips in the
-        // preview header (round 9), each visible ONLY while its own
+        // the executed-output face in the UI: two independent action chips in the
+        // preview header, each visible ONLY while its own
         // difference from the last real run exists -- executedChipStates
         // owns the rules, headless-tested in verify_workflow_restore.mjs:
         //   "Edited"     composition drifted -> click copies the executed
@@ -762,14 +912,14 @@ class ComposerUI {
         //                back into the widget (reproduce the run).
         // A red error chip covers "ran but the record could not arrive".
         this._executed = null; // {prompt, seed, at}
-        // C3 cross-graph hygiene (round 8): stash records outlive
+        // executed-output cross-graph hygiene: stash records outlive
         // workflows while node ids restart from 1, so THIS instance only
         // adopts writes that happened after its own birth. _pcBaselineAt
         // = newest stash timestamp seen at creation (null until primed);
         // _pcAdoptedAt = the exact record timestamp already consumed.
         this._pcBaselineAt = null;
         this._pcAdoptedAt = null;
-        // Round 11: true from "a loaded workflow lowered my baseline"
+        // True from "a loaded workflow lowered my baseline"
         // until the next poll tick resolves the question (adopted newer
         // OR confirmed none exists) -- drift chips label themselves
         // "Checking..." meanwhile instead of asserting queue-time data.
@@ -778,11 +928,11 @@ class ComposerUI {
         // requestExecutedOutput): surfaced as a red chip so a broken
         // chain is visible without opening any console.
         this._executedError = null;
-        // Round 9: two independent action chips + the error chip, each
+        // Two independent action chips + the error chip, each
         // visible ONLY while its own condition holds (pure rules in
         // executedChipStates). Edited -> copies the executed prompt;
         // Reset Seed -> writes the executed seed back into the widget.
-        // Round 33 (user request): each ALSO answers a 1-second press-
+        // Each ALSO answers a 1-second press-
         // and-hold, which accepts the CURRENT state as the executed
         // baseline instead of acting on the executed one -- the local,
         // deliberate way to retire a chip the user knows is stale
@@ -794,7 +944,7 @@ class ComposerUI {
             text: "Edited",
             onClick: () => {
                 if (this.editedChip._pcHoldFired) return; // hold consumed it
-                // Round 31: an executed "" is a REAL record (empty run)
+                // An executed "" is a REAL record (empty run)
                 // and clicking still copies it -- the string compare,
                 // not truthiness, is the test.
                 if (this._executed && typeof this._executed.prompt === "string") {
@@ -825,10 +975,92 @@ class ComposerUI {
             chip.style.display = "none";
         }
 
-        previewHeader.append(previewLabel, spacer, this.editedChip, this.resetSeedChip, this.execErrorChip, btnCopy);
+        previewHeader.append(this.previewLabel, spacer, this.editedChip, this.resetSeedChip, this.execErrorChip, btnCopy);
 
         this.previewText = el("textarea", "pc-preview-text", { readonly: "readonly" });
-        this.previewBar.append(previewHeader, this.previewText);
+        // The colorized view is a non-interactive overlay pinned exactly
+        // over the textarea (see .pc-preview-colorized in the CSS) --
+        // both live inside this wrapper so `position: absolute; inset:
+        // 0` on the overlay is relative to it, not to the whole preview
+        // bar (which also holds the header).
+        this.previewTextWrap = el("div", "pc-preview-text-wrap");
+        this.previewColorLayer = el("div", "pc-preview-colorized");
+        this.previewTextWrap.append(this.previewText, this.previewColorLayer);
+        // The overlay's own scrollbar is always hidden (see the CSS),
+        // so it never reserves gutter width on its own. If the
+        // textarea's NATIVE scrollbar is a classic, space-reserving one
+        // (platform/engine dependent -- an overlay-style scrollbar
+        // reserves none), its content area is a few pixels narrower
+        // than the overlay's whenever a scrollbar is actually showing,
+        // and the two would wrap their (otherwise identical) text
+        // differently right at that threshold. Compensating with the
+        // textarea's OWN measured gutter -- offsetWidth minus
+        // clientWidth, zero when no scrollbar is showing or the
+        // platform reserves none -- keeps the two boxes' available text
+        // width identical without touching the textarea itself (so its
+        // OFF-state look and behavior are exactly unchanged), and
+        // without hard-coding a scrollbar width that varies by OS/zoom.
+        const syncOverlayGutter = () => {
+            const gutter = this.previewText.offsetWidth - this.previewText.clientWidth;
+            this.previewColorLayer.style.paddingRight = `${4 + gutter}px`;
+        };
+        // Keep the (invisible-text) overlay's scroll position locked to
+        // the real textarea's, so scrolling the preview -- wheel, drag,
+        // keyboard -- moves the colored overlay in lockstep instead of
+        // leaving it pinned at the top while the real text scrolls
+        // underneath it. A no-op while OFF, since nothing looks at the
+        // overlay's scroll position then.
+        this.previewText.addEventListener("scroll", () => {
+            this.previewColorLayer.scrollTop = this.previewText.scrollTop;
+            this.previewColorLayer.scrollLeft = this.previewText.scrollLeft;
+        });
+        // The gutter only exists to measure once content is tall enough
+        // to scroll -- re-measure on the same cadence the scroll
+        // listener fires (a scroll can only happen once a scrollbar
+        // exists) and once eagerly after layout, so turning the toggle
+        // ON already has a correct value instead of waiting for a first
+        // scroll event that may never come for short text.
+        this.previewText.addEventListener("scroll", syncOverlayGutter);
+        requestAnimationFrame(syncOverlayGutter);
+        this._syncPreviewOverlayGutter = syncOverlayGutter;
+
+        // Hover-highlight + click-to-select for the colorized preview's
+        // word spans (see _renderColorizedPreview). Delegated on the
+        // overlay's CONTAINER rather than attached per-span: the spans
+        // are torn down and rebuilt on every repaint (every completed
+        // compose, every color edit), and a per-span listener would
+        // need re-attaching every single time; a delegated listener on
+        // the stable container needs wiring exactly once here.
+        this.previewColorLayer.addEventListener("mouseover", (ev) => this._handlePreviewHover(ev));
+        this.previewColorLayer.addEventListener("mouseout", (ev) => this._handlePreviewHover(ev));
+        this.previewColorLayer.addEventListener("click", (ev) => this._handlePreviewClick(ev));
+        // Forward wheel scrolling straight to the real textarea instead
+        // of letting the overlay handle it.
+        //
+        // The overlay must stay overflow:auto (not hidden) for its
+        // scrollTop to be settable at all -- see .pc-preview-colorized's
+        // own CSS comment -- but that inescapably also makes it a
+        // legitimate wheel-scroll target in its own right the moment a
+        // word span under the cursor has pointer-events:auto (needed
+        // for hover/click -- see .pc-preview-word's CSS). Without this
+        // listener, scrolling while the cursor happens to be over a
+        // word span scrolled the OVERLAY's own internal view instead of
+        // the textarea underneath -- the textarea (the thing every
+        // other consumer of "the scroll position" actually reads) never
+        // moved, which looked exactly like "scrolling doesn't work"
+        // whenever the mouse was over text rather than blank space.
+        // preventDefault() stops the browser from ALSO applying the
+        // wheel delta to the overlay itself once it's manually applied
+        // here to the textarea; the textarea's own "scroll" listener
+        // (registered above) then re-syncs the overlay to match, same
+        // as any other textarea scroll (drag, keyboard, trackpad).
+        this.previewColorLayer.addEventListener("wheel", (ev) => {
+            ev.preventDefault();
+            this.previewText.scrollTop += ev.deltaY;
+            this.previewText.scrollLeft += ev.deltaX;
+        }, { passive: false });
+
+        this.previewBar.append(previewHeader, this.previewTextWrap);
 
         // The composed string as of the last COMPLETED preview render.
         // Written from onComposed (below) and read at save time for the
@@ -841,7 +1073,7 @@ class ComposerUI {
             getState: () => this.state,
             getSeed: () => (this.node.seedWidget ? this.node.seedWidget.value : 0),
             getUserPrompt: () => {
-                // Round 12: a string LINKED into user_prompt outranks the
+                // A string LINKED into user_prompt outranks the
                 // textarea, exactly like it does at queue time.
                 const linked = resolveLinkedString(this.node);
                 if (linked != null) return linked;
@@ -1137,7 +1369,7 @@ class ComposerUI {
         // One render, rendering the right thing. Where the viewport
         // lands on the way back is the batch's _requestBrowseToEnd /
         // remembered-position logic below: a tail-appended block is
-        // revealed at the bottom (round 23), a moved block comes back
+        // revealed at the bottom, a moved block comes back
         // to the remembered position -- same as Cancel.
         const added = [];
         this.showLibraryPanel = false;
@@ -1168,7 +1400,7 @@ class ComposerUI {
                     movedBlock = true;
                 }
             }
-            // Round 23: when the block STAYS at the end (plain append,
+            // When the block STAYS at the end (plain append,
             // or a nearEnd plan) reveal it -- browsing back to the tail
             // is the whole point of adding there. A moved block sits by
             // the anchor, already inside the remembered viewport, so
@@ -1186,7 +1418,7 @@ class ComposerUI {
      * was deleted and a same-named one saved over the gap), and on screen
      * every one of them reads as the same broken thing. The comparison is
      * case-insensitive -- names differing only by case are the same name
-     * (Naming_Correction_Rules.md rule 1.7).
+     * under the naming rules.
      *
      * Only genuinely-missing cards come back. Anything still carrying
      * `entry`'s own ref is missing by identity -- same string, same failed
@@ -1455,12 +1687,12 @@ class ComposerUI {
             if (checkbox) checkbox.checked = on;
         }
         // In THIS panel the .pc-selected class IS the pick, so the bulk
-        // toolbar's show-only-selected filter (round 17) reads exactly
+        // toolbar's show-only-selected filter reads exactly
         // what we just toggled. While it is on, a deselect must hide the
         // card and a (Select-all) select must reveal it -- re-run the one
         // display pass so the view tracks the class we just moved.
         if (this.librarySelectedOnly) {
-            // Round 34: through the one search pass, so deselecting under
+            // Through the one search pass, so deselecting under
             // a live query refreshes rank + marks too, not just display.
             this.filterLibraryEntries(this.library.searchText);
         }
@@ -1501,14 +1733,14 @@ class ComposerUI {
         element.classList.toggle("pc-entry-hidden", !entry.visible);
         element.classList.toggle("pc-selected", this.selectedEntryIds.has(entry.id));
         // The visible-only filter reads the .pc-entry-visible class we JUST changed,
-        // and the selected-only filter (round 17) the .pc-selected class toggled
+        // and the selected-only filter the .pc-selected class toggled
         // one line above -- so a card flipping either way while either
         // filter is on must re-evaluate its own display; otherwise
         // unchecking a card would leave it on screen (checking one would
         // leave it hidden). Only the single changed card moves; no
         // full-panel pass.
         if ((this.sectionVisibleOnly || this.sectionSelectedOnly || this.alertsOnlyMode) && element.dataset.searchText !== undefined) {
-            // Round 35: through the shared row decision, so a card
+            // Through the shared row decision, so a card
             // flipping state under a live query also gets its rank and
             // marks refreshed -- not just its display.
             this._applySectionRow(
@@ -1519,7 +1751,7 @@ class ComposerUI {
 
         const randomButton = element.querySelector(".pc-entry-random-btn");
         if (randomButton) {
-            // Round 59: routed through the toggle factory's own live
+            // Routed through the toggle factory's own live
             // re-apply. The hand-written copy managed pc-on but NOT
             // pc-always-visible -- the class that keeps an ON button
             // shown while the card is not hovered -- so it drifted with
@@ -1634,7 +1866,7 @@ class ComposerUI {
                         }
                     }
                     // Pasted cards append at the end -- reveal them
-                    // (round 23; request set inside the batch so the
+                    // (the request is set inside the batch so the
                     // close-notify render already carries it).
                     this._requestBrowseToEnd(section);
                 });
@@ -1666,10 +1898,10 @@ class ComposerUI {
      * directly below the entry toolbar, and returns null -- contributing
      * no element at all -- unless something is selected.
      *
-     * Paste used to live here, and used to be the reason the bar could open
-     * on an empty selection: its main use is a freshly-added, still-empty
-     * section. That made the bar appear with a lone disabled-looking cluster
-     * over nothing, so Paste has moved up into the entry toolbar beside Add
+     * Paste does not live here: it would let the bar open on an empty
+     * selection (its main use is a freshly-added, still-empty section),
+     * showing a lone disabled-looking cluster over nothing. Paste sits in
+     * the entry toolbar beside Add instead
      * (see sectionEntryToolbar), which is where it belongs and where it can
      * simply be absent when the clipboard is empty. This bar is now purely
      * about the selection.
@@ -1783,7 +2015,7 @@ class ComposerUI {
      * button appears or disappears with the clipboard -- which Copy and Cut
      * have just changed. Each is rebuilt whole rather than patched, since
      * rebuilding a handful of stateless buttons is cheaper, and far less
-     * fragile, than the bookkeeping that used to keep each in sync by hand.
+     * fragile, than keeping each in sync by hand.
      */
     refreshEntryToolbar(section) {
         const anchor = this.rightPanel.querySelector('[data-entry-toolbar="section"]');
@@ -1810,7 +2042,7 @@ class ComposerUI {
     }
 
     /**
-     * The live search pass (round 34) -- everything a query changes,
+     * The live search pass -- everything a query changes,
      * in one place, over the MOUNTED rows of the library grid:
      *  1. visibility: word-AND over the row's search blob, plus the
      *     category / favourite / selected-only clauses the structural
@@ -1990,11 +2222,11 @@ class ComposerUI {
     }
 
     populateLibraryCategorySelect(select) {
-        const counts = this.library.getCategoryCounts();
+        const counts = this.library.getCategoryCountsWithFolders();
         let selected = this.library.selectedCategory;
         select.innerHTML = "";
         select.append(el("option", null, { value: "All", text: "All" }));
-        for (const category of this.library.getAllCategories()) {
+        for (const category of this.library.getAllCategoriesWithFolders()) {
             // Zero-count categories drop out of the list -- except the
             // one currently selected. Showing "Foo (0)" is honest and
             // keeps the dropdown able to DISPLAY the filter that is
@@ -2013,16 +2245,16 @@ class ComposerUI {
     }
 
     /**
-     * The section-panel search pass (round 35) -- round 34's engine,
+     * The section-panel search pass -- the same engine as the Library search,
      * applied to a section's OWN entries. Same contract as
      * filterLibraryEntries (see its doc for the why behind CSS order
      * and the keyed highlight), two differences by necessity: rows are
      * keyed by ENTRY id (one prompt may sit in a section twice), and
      * the clauses carry the section's extra views (visible-only and
      * alerts-only isolation alongside category/favourite/selected).
-     * The scoped container also ENDED the old rightPanel-wide
-     * attribute sweep this used to run -- section cards, library cards
-     * and anything else wearing both attributes all answered to it.
+     * The scoped container avoids a rightPanel-wide attribute
+     * sweep, which section cards, library cards and anything else
+     * wearing both attributes would all answer to.
      */
     filterSectionEntries(query, category) {
         const container = this._secRowsContainer;
@@ -2106,7 +2338,7 @@ class ComposerUI {
         // path would mean a single keystroke silently re-widened a
         // favourites-only list.
         const matchesFavorites = !ctx.favoritesOnly || categories.some(isFavoriteCategory);
-        // Visible-only view filter (round 21: counter chip; round 25: the
+        // Visible-only view filter (counter chip; the
         // ELIGIBILITY-JUDGED flag -- false while the on-screen view cannot
         // isolate, so the clause lets every card through instead of
         // emptying the panel). "Visible" is read from the card's OWN
@@ -2116,14 +2348,14 @@ class ComposerUI {
         // can never disagree with what the eye toggles show.
         const matchesVisible = !ctx.visibleOnly
             || node.classList.contains("pc-entry-visible");
-        // The bulk toolbar's "show only selected" filter (round 17): the
+        // The bulk toolbar's "show only selected" filter: the
         // section's SELECTED set (the top-right checkbox), distinct from
         // visibility. The class is toggled in refreshRenderedEntry
         // alongside the checkbox, so it is the live source of truth here
         // too. ANDed with the rest.
         const matchesSelected = !ctx.selectedOnly
             || node.classList.contains("pc-selected");
-        // Alerts-only view filter (round 27: the alert chip's toggle). The
+        // Alerts-only view filter (the alert chip's toggle). The
         // card's OWN dataset.entryAlert -- stamped by entrySearchDataset
         // from the same merged display the chip's counts classify -- is
         // the truth: "missing" and "workflow" pass, everything else
@@ -2137,7 +2369,7 @@ class ComposerUI {
     }
 
     /**
-     * THE visible-only eligibility, round 25 -- the single truth the
+     * THE visible-only eligibility -- the single truth the
      * filter clause, the counter ring and the chip tooltip all read, so
      * they can never disagree. The flag is an intention that travels
      * with section switches, but isolation is a VIEW of one section's
@@ -2145,7 +2377,7 @@ class ComposerUI {
      * parallel, independent flag), to a locked "prompt" pseudo-section
      * (one card, no Show/Hide), or to a section with ZERO visible
      * entries -- isolating there would show nothing, exactly the
-     * dead-end round 16b swore off. So those views show everything and
+     * dead end to avoid. So those views show everything and
      * no chip wears the ring; leaving such a view behind, a return to a
      * section that CAN isolate resumes the armed filter.
      */
@@ -2157,7 +2389,7 @@ class ComposerUI {
     }
 
     /**
-     * Is the ALERTS-only filter (round 27, the alert chip toggle) SHOWING
+     * Is the ALERTS-only filter (the alert chip toggle) SHOWING
      * for the entry list a filter pass is about to run over? Mirrors
      * _visibleOnlyApplies: the armed section must BE the viewed one, and
      * it must actually HAVE problem cards -- isolating a clean section
@@ -2174,10 +2406,9 @@ class ComposerUI {
 
     /**
      * The view filter that shows ONLY the section's visibility-ON cards.
-     * Since round 21 its single entry point is the section row's "N/M"
-     * counter in the left panel (round 16's eyescan button was retired --
-     * the counter already tracks the same visible count, so it was the
-     * natural home and removing the button kills the two-control sync).
+     * Its single entry point is the section row's "N/M" counter in the
+     * left panel (the counter already tracks the same visible count, so a
+     * second control would need syncing).
      * Purely a display pass -- hiding a card's view never changes
      * entry.visible, and the dimmed cards all stay mounted, so one filter
      * pass narrows and the next re-widens. The green ring rides the
@@ -2192,7 +2423,7 @@ class ComposerUI {
     }
 
     /**
-     * The counter pill's one tooltip truth (round 21b): an empty section
+     * The counter pill's one tooltip truth: an empty section
      * states "No visible entries" and never advertises a toggle (its
      * handler is not even wired); the ringed active chip explains what
      * the next click will undo; anything else offers the filter.
@@ -2211,7 +2442,7 @@ class ComposerUI {
      * tooltip. Only the ACTIVE section's chip can ever be ringed (the
      * filter narrows the one panel you are looking at), so we patch just
      * that [data-section-count-filter] node. A zero-visible section is
-     * inert (round 21b): the ring can never stay on an empty count --
+     * inert: the ring can never stay on an empty count --
      * the gates release the flag the moment visibility collapses -- and
      * the tooltip then reads "No visible entries".
      */
@@ -2221,7 +2452,7 @@ class ComposerUI {
         );
         if (!chip) return;
         const section = this.state.sections.find((s) => s.id === this.state.activeSectionId);
-        // Round 25: the ring answers "is isolation APPLIED right now",
+        // The ring answers "is isolation APPLIED right now",
         // not "was the flag armed" -- so it never outlives eligibility
         // (empty section, Library view, locked prompt).
         chip.classList.toggle("pc-on", this._visibleOnlyApplies());
@@ -2229,7 +2460,7 @@ class ComposerUI {
     }
 
     /**
-     * Counter chip click (round 21). On a non-active section it selects
+     * Counter chip click. On a non-active section it selects
      * it AND arms the filter in one move (the whole point is "let me see
      * what THIS section composes"); on the already-active section it is a
      * plain toggle. The select branch defers the ring to the ensuing
@@ -2237,7 +2468,7 @@ class ComposerUI {
      * branch patches it in place.
      */
     _onCountFilterClick(section) {
-        // Round 21b: zero visible -> the pill is inert (the builder also
+        // Zero visible -> the pill is inert (the builder also
         // omits the handler; this guards programmatic callers). There is
         // nothing to filter TO, so arming here would only empty the panel.
         if (this.state.countVisible(section) <= 0) return;
@@ -2258,7 +2489,7 @@ class ComposerUI {
     }
 
     /**
-     * The bulk toolbar's "N selected" chip (round 17): toggle the view
+     * The bulk toolbar's "N selected" chip: toggle the view
      * filter that narrows the panel to exactly the SELECTED cards. Same
      * display-pass doctrine as the visible-only filter above -- no pick is
      * made or cleared by it, the ordinary Deselect-all button still owns
@@ -2278,7 +2509,7 @@ class ComposerUI {
         this.filterSectionEntries(this.sectionSearchText || "", this.sectionSelectedCategory || "All");
     }
 
-    /** Library-panel twin of _applySectionSelectedOnlyToggle (round 17):
+    /** Library-panel twin of _applySectionSelectedOnlyToggle:
      * narrows the browser to the selected prompts through the one
      * library filter pass, and re-rings the chip in place -- the strips
      * get rebuilt whole by _renderLibrarySelectionChrome, so the patch
@@ -2359,14 +2590,22 @@ class ComposerUI {
      * search text is deliberately not an input -- counts describe the
      * section, not the current filter, so a fruitless query can never
      * evict the selected category from the control that is displaying
-     * it (the same lie this fixed in the Library dropdown; see
+     * it (the Library dropdown works the same way; see
      * LibraryController.countCategories).
      */
     populateSectionCategorySelect(select, section, resolvedMap) {
         const counts = new Map();
         for (const entry of section.entries) {
             const display = resolvedMap[entry.prompt_ref];
-            for (const category of display?.category || []) {
+            // categoryMembershipFor (Favorite INCLUDED, unlike
+            // categoryBadgesFor -- see its own comment), NOT
+            // display?.category directly -- adds the folder pseudo-
+            // category too (see entrySearchDataset's matching fix on
+            // the filter side; both need to agree on what "this
+            // entry's categories" means for MATCHING purposes, or the
+            // dropdown could offer an option every row then fails to
+            // match).
+            for (const category of categoryMembershipFor(display)) {
                 counts.set(category, (counts.get(category) || 0) + 1);
             }
         }
@@ -2377,7 +2616,18 @@ class ComposerUI {
         if (selected !== "All" && !counts.has(selected)) counts.set(selected, 0);
         select.innerHTML = "";
         select.append(el("option", null, { value: "All", text: "All" }));
-        for (const category of sortCategoriesPinningFavorite(Array.from(counts.keys()))) {
+        // Folders FIRST, sorted alphabetically by their plain name (not
+        // by the "📁 " marker, which would sort identically anyway
+        // since every folder option shares it) -- then every real
+        // category, Favorite pinned ahead of the rest. Matches the
+        // Library toolbar's own ordering (see
+        // LibraryController.getAllCategoriesWithFolders).
+        const allNames = Array.from(counts.keys());
+        const folderNames = allNames
+            .filter(isFolderPseudoCategory)
+            .sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+        const realNames = sortCategoriesPinningFavorite(allNames.filter((c) => !isFolderPseudoCategory(c)));
+        for (const category of [...folderNames, ...realNames]) {
             select.append(el("option", null, { value: category, text: `${category} (${counts.get(category)})` }));
         }
         select.value = selected;
@@ -2395,9 +2645,9 @@ class ComposerUI {
             // Toggling the last visible card off (or the first on) updates
             // this counter in place -- no full re-render -- so the
             // orange/gray empty-state pill has to follow the count here
-            // too, not just when the row is first built. Round 21b: the
+            // too, not just when the row is first built. The
             // tooltip flips with it ("No visible entries" <-> the
-            // filter's offer). Round 21c: NO handler juggling here --
+            // filter's offer). NO handler juggling here --
             // the builder's single handler stays attached forever and
             // re-checks countVisible live, so this patch must never set
             // chip's onclick PROPERTY (a handler on top of the listener
@@ -2440,7 +2690,7 @@ class ComposerUI {
             this._patchSectionCountRing();
             this.filterSectionEntries(this.sectionSearchText || "", this.sectionSelectedCategory || "All");
         } else if (this.sectionVisibleOnly && section.id === this.state.activeSectionId) {
-            // Round 25, the OTHER eligibility edge: the viewed section
+            // The OTHER eligibility edge: the viewed section
             // just went from nothing-to-isolate to something (first card
             // shown while the armed filter lay dormant, e.g. arrived at
             // 0/12 and flipped a card visible). The view must equal
@@ -2547,7 +2797,7 @@ class ComposerUI {
     }
 
     /**
-     * Alert chip click (round 27; Library chip retired in round 28).
+     * Alert chip click.
      * Mirrors the counter chip: a non-viewed section's chip SELECTS it
      * AND arms in one move; the viewed section's chip toggles IN PLACE
      * (ring patch + one filter pass -- the pass only runs while an
@@ -2684,7 +2934,7 @@ class ComposerUI {
         const sectionId = container.dataset.browseSectionId || this.state.activeSectionId;
         if (!sectionId) return;
         const entry = browseScrollEntry(container);
-        // Round 24: a container that was just rebuilt and has NOT filled
+        // A container that was just rebuilt and has NOT filled
         // yet (its cards still resolve in the background) reports scroll
         // 0 with no overflow -- that is not the user's position, and
         // memorising it poisons the section with "top". Skip; the slots
@@ -2700,7 +2950,7 @@ class ComposerUI {
 
     /**
      * Ask for `section`'s browse list to be revealed AT ITS END on the
-     * next render that shows it (round 23). Call this INSIDE the change
+     * next render that shows it. Call this INSIDE the change
      * batch (withBatch) so the notify fired at batch close renders with
      * the request already standing -- or right before an explicit
      * render(). Deliberately survives unrelated views being up in the
@@ -2712,8 +2962,8 @@ class ComposerUI {
 
     /**
      * Ask for `section`'s next browse render to restore at the SAME
-     * RELATIVE position (percentage from start to end of the list,
-     * round 24) rather than the remembered pixels. Same consumption
+     * RELATIVE position (percentage from start to end of the list)
+     * rather than the remembered pixels. Same consumption
      * rules as _requestBrowseToEnd (browse view of THAT section only);
      * a standing bottom-reveal request outranks it.
      */
@@ -2807,8 +3057,8 @@ class ComposerUI {
         this._stashBrowseScroll();
         this._pruneSectionScrolls();
         this._scrollPreserver.capture(this.getScrollRegions());
-        // A pending "reveal the appended tail" outranks memory
-        // (round 23). pixels:Infinity + fraction:1 lands exactly on
+        // A pending "reveal the appended tail" outranks memory.
+        // pixels:Infinity + fraction:1 lands exactly on
         // maxScroll in EVERY apply pass (the immediate one, the double
         // rAF ones, and the deferred pass after the async chunk-fill
         // settles) -- which is precisely what a grid whose height keeps
@@ -2850,7 +3100,7 @@ class ComposerUI {
         // is on disk. Every content change funnels through notify() ->
         // render(), including the ones that don't touch the DOM at all.
         this.presetToolbar.refreshDirtyState();
-        // Round 42: the six bulk flag buttons flip the SAME section
+        // The six bulk flag buttons flip the SAME section
         // flags the row toggles flip -- for every section at once.
         // Re-sync each mounted row's chrome in place (row._pcSync,
         // see renderLeftPanel) instead of rebuilding the list; the
@@ -2864,7 +3114,7 @@ class ComposerUI {
         });
         renderLeftPanel(this.leftPanel, {
             state: this.state,
-            // Round 41: section-row flags (enabled/randomize/label/
+            // section-row flags (enabled/randomize/label/
             // end-separator) patch their own row in place; the entry
             // grid never changes, so compose + persist + dirty-check
             // only (notifyInPlace) -- no list rebuild, no flicker. The
@@ -2881,12 +3131,12 @@ class ComposerUI {
             isLibraryActive: this.showLibraryPanel,
             libraryColor: this.libraryColor,
             // Only ever one row: the visible-only filter narrows the
-            // panel of the section you are looking at (round 21) -- and
-            // only while it CAN (round 25: not the Library view, not a
+            // panel of the section you are looking at -- and
+            // only while it CAN (not the Library view, not a
             // locked prompt, not a section with nothing visible to
             // isolate; see _visibleOnlyApplies).
             visibleOnlySectionId: this._visibleOnlyApplies() ? this.state.activeSectionId : null,
-            // Round 26/28: the alert chips -- per-section counts from
+            // The alert chips -- per-section counts from
             // _refStatus (the Library row has none: its prompts simply
             // ARE the folder). Built every render (hidden at 0/0);
             // _applyAlertSnapshots keeps them honest between renders
@@ -2896,7 +3146,7 @@ class ComposerUI {
             onToggleAlertFilter: (section) => this._onAlertFilterClick(section),
             onToggleCountFilter: (section) => this._onCountFilterClick(section),
             onOpenLibrary: () => {
-                // Round 22: re-clicking Library while it is already the
+                // re-clicking Library while it is already the
                 // open, untargeted browse view is a NO-OP -- the handler
                 // below would reset nothing and a rebuild just flashes
                 // the prompt grid. Guarded to the exact set of fields it
@@ -2921,36 +3171,7 @@ class ComposerUI {
                 this.editTarget = { type: "library-color" };
                 this.render();
             },
-            onSelectSection: (id) => {
-                // Round 22: re-clicking the ALREADY-active section is a
-                // no-op -- every field this handler resets is already at
-                // its default, so the only thing a rebuild would do is
-                // flash the entry grid. The moment anything differs (an
-                // open edit panel, a live search/category/favorites
-                // filter, a selection to clear, a replacement pick in
-                // flight, or the Library panel to leave) the click has
-                // work to do and the full path runs unchanged.
-                if (id === this.state.activeSectionId && !this.showLibraryPanel
-                    && this.editTarget === null && this.selectedEntryIds.size === 0
-                    && this.sectionSearchText === "" && this.sectionSelectedCategory === "All"
-                    && !this.sectionFavoritesOnly && this._replacingEntryTarget === null) {
-                    return;
-                }
-                this.editTarget = null;
-                this.showLibraryPanel = false;
-                this.selectedEntryIds.clear();
-                this.sectionSearchText = "";
-                this.sectionSelectedCategory = "All";
-                this.sectionFavoritesOnly = false;
-                // Navigating to a section implicitly cancels an
-                // in-progress "pick a replacement" flow (see
-                // startReplacingEntry) -- there's no sensible way to
-                // finish the pick once the Library panel that was
-                // showing it is gone.
-                this._replacingEntryTarget = null;
-                this.state.activeSectionId = id;
-                this.render();
-            },
+            onSelectSection: (id) => this.selectSection(id),
             onOpenSectionEdit: (id) => {
                 this.editTarget = { type: "section", sectionId: id };
                 this.render();
@@ -2973,7 +3194,7 @@ class ComposerUI {
                     }
                     if (selectedPromptRefs.length) this.librarySelectedPromptRefs.clear();
                     this.editTarget = { type: "section", sectionId: section.id };
-                    // Round 24: the batch-close notify IS the render -- the
+                    // The batch-close notify IS the render -- the
                     // old trailing render() double-raced it (scroll-memory
                     // poisoning; see the cross-section drop handler).
                 });
@@ -2991,8 +3212,8 @@ class ComposerUI {
                         this.state.addEntryFromLibrary(section.id, promptRef);
                     }
                     // The drop appended at the end -- ask to reveal it
-                    // (round 23). If the section is not the view on
-                    // screen right now (library browse usually still is),
+                    // (if the section is not the view on
+                    // screen right now -- library browse usually still is --
                     // the request stands until it next renders.
                     this._requestBrowseToEnd(section);
                     this.librarySelectedPromptRefs.clear();
@@ -3000,7 +3221,7 @@ class ComposerUI {
                     // what this mode exists for, so the mode is done -- the
                     // pick it was holding has just landed by another route.
                     this._addingToSection = null;
-                    // Round 24: nothing AFTER the batch -- the close's own
+                    // Nothing AFTER the batch -- the close's own
                     // notify renders the settled state. The old trailing
                     // render() was a second, racing render (see the
                     // cross-section drop handler: it is what made scroll
@@ -3032,7 +3253,7 @@ class ComposerUI {
                 });
                 if (choice !== "copy" && choice !== "move") return; // cancelled/dismissed
 
-                // Round 24: everything inside ONE outer batch. transferEntries
+                // Everything inside ONE outer batch. transferEntries
                 // carries its own batch-close notify, and the old explicit
                 // render() right after it was a SECOND render whose
                 // stash/capture caught the first render's container before
@@ -3044,8 +3265,7 @@ class ComposerUI {
                 this.state.withBatch(() => {
                     this.state.transferEntries(sourceSectionId, targetSectionId, transferable, choice);
                     // Copy and move both land at the target's end -- reveal
-                    // them when that section's list next comes on screen
-                    // (round 23).
+                    // them when that section's list next comes on screen.
                     this._requestBrowseToEnd(targetSection);
 
                     // The dragged entries' bulk-selected state no longer
@@ -3071,7 +3291,7 @@ class ComposerUI {
             },
         });
 
-        // Round 26: with fresh chips built, make sure their data is
+        // With fresh chips built, make sure their data is
         // current -- the sweep is a no-op while the ref set and the
         // workflow snapshot are unchanged, so re-renders cost one
         // string compare, not a network call.
@@ -3125,6 +3345,20 @@ class ComposerUI {
                 this._scrollPreserver.restore();
             });
         }
+        // Exposed so a caller that needs the right panel FULLY built --
+        // not just synchronously appended, but past any chunked entry
+        // fill too (see scrollPreviewEntryIntoView) -- has something to
+        // await. Resolves once this SPECIFIC render's content has
+        // settled; a render superseded before that point never resolves
+        // its own promise (nothing to scroll to -- see the guard above),
+        // but the newer render's own promise takes over correctly since
+        // callers always read this property fresh, right before using
+        // it, rather than capturing it early.
+        this._lastRenderSettled = pendingContentFill
+            ? pendingContentFill.then(() => {
+                  if (renderSeq !== this._renderSeq) return null;
+              })
+            : Promise.resolve();
     }
 
     clearRightPanel() {
@@ -3211,6 +3445,17 @@ class ComposerUI {
                     this.editTarget = null;
                     this.render();
                 },
+                // Fires on every accent-color commit (color picker
+                // "change", and the dice/randomize button), WITHOUT a
+                // full this.render() -- a full render tears down and
+                // rebuilds this very edit panel (see clearRightPanel),
+                // which would blow away the native color-picker popup
+                // mid-interaction. The preview-only repaint has no such
+                // cost: it touches only the PREVIEW label/text, never
+                // rightPanel, so the color field keeps focus and the
+                // preview updates live in the same breath -- exactly
+                // the "immediately" behavior asked for.
+                onColorChange: () => this._refreshPreviewColorState(),
                 confirmDialog: this.showConfirmDialog,
             });
         } else if (this.editTarget.type === "library-new" || this.editTarget.type === "library-edit") {
@@ -3222,6 +3467,22 @@ class ComposerUI {
                 library: this.library,
                 fileToDataUrl,
                 confirmDialog: this.showConfirmDialog,
+                onCategoryRenamed: (oldName, newName) => {
+                    // Mirror LibraryController.renameCategory's own
+                    // self-heal of this.library.selectedCategory (the
+                    // library browser's filter), but for a SECTION's
+                    // filter, which lives here rather than on the
+                    // library controller (see sectionSelectedCategory's
+                    // own declaration). Every entry's category already
+                    // moved to newName by the time this fires (the
+                    // panel awaits the rename before calling this), so
+                    // without this remap a section filtered to the old
+                    // name keeps asking for a name nothing carries
+                    // anymore -- an empty list until re-picked by hand.
+                    if (this.sectionSelectedCategory === oldName) {
+                        this.sectionSelectedCategory = newName;
+                    }
+                },
                 onDone: (result) => {
                     const oldRef = this.editTarget?.promptRef;
                     const newRef = result?.entry?.prompt_ref;
@@ -3235,7 +3496,7 @@ class ComposerUI {
                     this.editTarget = null;
                     this._displayCache.clear();
                     this.preview.invalidate([oldRef, newRef].filter(Boolean));
-                    // Round 30b: when the panel reported the picture
+                    // When the panel reported the picture
                     // moved, bump AND remake the mounted card directly.
                     // The version/freshness bookkeeping is the normal
                     // route, but a library card that keeps showing an
@@ -3278,9 +3539,9 @@ class ComposerUI {
      * than merely stale. Search TEXT is deliberately not in here: it is
      * a show/hide pass over the same rows. Neither is search VISIBILITY
      * any more -- the strip is a node this build owns and can insert or
-     * remove in place (see _applyLibrarySearchVisibility), which is what
-     * the search button used to force a full (chunked, scroll-jumping)
-     * rebuild for one toolbar. Category, favourite and view mode ARE
+     * remove in place (see _applyLibrarySearchVisibility), so the search button
+     * does not need a full (chunked, scroll-jumping) rebuild to show or
+     * hide one toolbar. Category, favourite and view mode ARE
      * keys: they change which rows exist and in what shape. So does
      * either focused mode, whose notice and per-card badges belong to
      * the rows themselves.
@@ -3332,12 +3593,11 @@ class ComposerUI {
      * with the same entry-toolbar layout as section rows, minus copy/
      * cut/paste and with add/delete actions tied to library prompts. */
     renderLibraryBrowser() {
-        // The panel-swap fast path. render() used to rebuild the whole
-        // browse DOM every time it came back from an edit panel (or a
-        // star, which re-renders too): hundreds of rows re-created, the
-        // fill spread over frames, and scrollTop landing at 0 first --
-        // the lag + jump. renderLibraryBrowser now stashes the wrap it
-        // built, and this path puts that exact DOM back (every row, its
+        // The panel-swap fast path. Rebuilding the whole browse DOM every
+        // time render() comes back from an edit panel would re-create
+        // hundreds of rows, spread the fill over frames, and land scrollTop
+        // at 0 first -- lag plus a jump. So renderLibraryBrowser stashes
+        // the wrap it built, and this path puts that exact DOM back (every row, its
         // loaded thumbnails and its badge fits intact; selection is
         // re-derived from the live set, never trusted from the cache)
         // and only patches what actually changed underneath it (see
@@ -3372,7 +3632,7 @@ class ComposerUI {
                 this._renderLibrarySelectionChrome();
                 const select = cached.querySelector(".pc-search-category-select");
                 if (select) this.populateLibraryCategorySelect(select);
-                // Round 34: rebind the search refs (panel round-trips
+                // Rebind the search refs (panel round-trips
                 // return the SAME nodes, but the cache path is not the
                 // place to trust it) and replay the live query over
                 // whatever this sync moved, rebuilt or added -- rows
@@ -3466,7 +3726,7 @@ class ComposerUI {
                 } finally {
                     this.render();
                     this.preview.render();
-                    // Round 26: a rescan is exactly the change the
+                    // A rescan is exactly the change the
                     // sweep's ref-set guard CANNOT see -- the preset
                     // uses the same refs, but the LIBRARY under them
                     // moved (a gone prompt came back, a live one was
@@ -3487,7 +3747,7 @@ class ComposerUI {
             titleOn: "Hide search",
             titleOff: "Show search",
             // Patches the mounted DOM (insert/remove one strip) rather
-            // than re-rendering: this used to rebuild the entire browse
+            // than re-rendering, which would rebuild the entire browse
             // list -- chunked fill and scroll jump included -- to show
             // or hide a single toolbar row.
             onClick: () => {
@@ -3656,7 +3916,7 @@ class ComposerUI {
         wrap.append(toolbar);
         if (this.librarySearchVisible) wrap.append(searchToolbar);
         wrap.append(container);
-        // Round 34: the no-results block lives BESIDE the grid, never
+        // The no-results block lives BESIDE the grid, never
         // inside it -- a child of the rows container would be scanned
         // by _syncLibraryRows as a candidate row.
         this._libEmptyNode = el("div", "pc-search-empty");
@@ -3684,7 +3944,7 @@ class ComposerUI {
         this._libWrapCacheKey = viewKey;
         // Resolves once the last chunk is in the DOM (immediately when
         // everything already fit in a frame); render() chains the final
-        // scroll restore onto this. Round 34: the same then() settles
+        // scroll restore onto this. The same then() settles
         // the search view over the COMPLETE set -- batches only ever
         // saw themselves, so rank, marks and the summary get their
         // final pass here (guarded: a re-render mid-fill owns the view
@@ -3719,7 +3979,13 @@ class ComposerUI {
         const fresh = [];
         for (const entry of entries) {
             if (!entry || rendered.has(entry.prompt_ref)) continue;
-            if (category !== "All" && !(entry.category || []).includes(category)) continue;
+            // categoryMembershipFor, not entry.category directly -- same
+            // fix as getStructuralEntries()'s own category check
+            // (folder pseudo-category + Favorite membership), applied
+            // here too since this is a SEPARATE structural filter for
+            // entries arriving via the chunked/streaming scan rather
+            // than the initial full list.
+            if (category !== "All" && !categoryMembershipFor(entry).includes(category)) continue;
             if (favoritesOnly && !isFavoriteEntry(entry)) continue;
             rendered.add(entry.prompt_ref);
             fresh.push(entry);
@@ -3788,7 +4054,7 @@ class ComposerUI {
         // still holds the row this pass REMOVED from the DOM for its
         // rebuilt ref, and preferring it resurrected the dead old node
         // back into the slot while the fresh twin sat at the end of the
-        // container (round 53: the "category badges never update after
+        // container (the "category badges never update after
         // an in-place edit" bug -- renames dodged it only because their
         // new ref was never mounted at all).
         const nodeFor = (ref) => builtNodes.get(ref) || mountedNodes.get(ref);
@@ -3817,7 +4083,7 @@ class ComposerUI {
     /**
      * Replace ONE mounted library row with a freshly built node for its
      * CURRENT entry -- no freshness comparison, no plan, no bump
-     * bookkeeping (round 30b; called when the edit panel has just
+     * bookkeeping (called when the edit panel has just
      * confirmed the picture changed). Works on the detached cached wrap
      * too: the patch happens before the next render restores it. If the
      * row is not mounted (never rendered, renamed away, or the browser
@@ -3829,9 +4095,7 @@ class ComposerUI {
         // isConnected is deliberately NOT required: mid-save the cached
         // wrap is DETACHED (the edit panel owns the right pane), and a
         // detached subtree accepts DOM surgery fine -- the repair lands
-        // before the next render restores this very wrap. (Round 30b
-        // shipped with the gate and quietly no-oped in exactly the
-        // reported flow.)
+        // before the next render restores this very wrap.
         if (!promptRef || !container || !this._libBuildNode) return "no-wrap";
         const node = Array.from(container.children).find((n) => n.dataset?.promptRef === promptRef);
         if (!node) return "no-row";
@@ -3847,10 +4111,10 @@ class ComposerUI {
     /**
      * The star click, end to end.
      *
-     * Used to be: click -> PATCH -> full library rescan (one rewritten
-     * file dirties the server's scan signature, so the rescan re-walks
-     * every prompt) -> this.render() -> hundreds of cards rebuilt. That
-     * is why it felt like the UI was thinking about it. A favorite is
+     * Not: click -> PATCH -> full library rescan (one rewritten file
+     * dirties the server's scan signature, so the rescan re-walks every
+     * prompt) -> this.render() -> hundreds of cards rebuilt, which would
+     * make the UI feel like it was thinking about it. A favorite is
      * one category tag on one prompt: the only visible effects are that
      * card's star, the favourite-filter show/hide state, and the
      * category dropdown's counts -- and the server's response to the
@@ -3907,9 +4171,9 @@ class ComposerUI {
             : null;
         for (const node of container.querySelectorAll(`[data-prompt-ref="${CSS.escape(ref)}"]`)) {
             if (reconcile) {
-                node.dataset.categories = JSON.stringify(reconcile.category || []);
-                node.dataset.fCategory = (reconcile.category || []).join("|");
-                // Round 34: categories live INSIDE the search blob now,
+                node.dataset.categories = JSON.stringify(categoryMembershipFor(reconcile));
+                node.dataset.fCategory = categoryStampKey(reconcile);
+                // Categories live INSIDE the search blob now,
                 // so a star is a TEXT change too -- restamp, or the row
                 // would keep answering the old category query.
                 node.dataset.searchText = searchBlob(reconcile);
@@ -3964,7 +4228,7 @@ class ComposerUI {
         const bulkToolbar = this.sectionBulkToolbar(section);
         if (bulkToolbar) this.rightPanel.append(bulkToolbar);
 
-        // Search toolbar, MOUNTED only when toggled on (per spec, hidden
+        // Search toolbar, MOUNTED only when toggled on (hidden
         // by default and revealed via the Entry toolbar's Search button)
         // but always BUILT and stashed -- showing it is then inserting
         // this exact node back, not a full re-render: rebuilding to
@@ -3974,7 +4238,7 @@ class ComposerUI {
         // section's OWN entries are visible/pickable, by resolved
         // library content (name/prompt/category) -- they never change
         // section.entries itself, only what's rendered.
-        // Round 39: the strip's DOM + grammar live in ui_chrome.buildSearchBox
+        // The strip's DOM + grammar live in ui_chrome.buildSearchBox
         // (byte-twin of the Library's -- they merged into one). What stays
         // here is section-specific: whose state the text mirrors, the
         // debounce, and the extra category/favourite filters on the right.
@@ -3996,7 +4260,7 @@ class ComposerUI {
             // over the built cards -- never a reason to rebuild them.
             this.filterSectionEntries(this.sectionSearchText, this.sectionSelectedCategory);
         };
-        // Round 35: the same typing/commit split as the Library box --
+        // The same typing/commit split as the Library box --
         // keystrokes debounce, deliberate actions (Enter, Esc, the
         // cross) flush immediately. The isConnected guard lands a late
         // timer on a superseded render as the no-op it is.
@@ -4030,7 +4294,7 @@ class ComposerUI {
             const sectionFavBtn = buildFavoriteFilterButton({
                 active: this.sectionFavoritesOnly,
                 onChange: (next) => {
-                    // Round 43: favourites is ONE CLAUSE of the live
+                    // Favourites is ONE CLAUSE of the live
                     // filter pass (_applySectionRow), exactly like the
                     // search text -- so flipping it rides that pass:
                     // flip the flag, redraw the button via applyState,
@@ -4060,7 +4324,7 @@ class ComposerUI {
         container.dataset.browseSectionId = section.id;
         this._wireBrowseScrollMemory(container, section.id);
         section._moveEntryCallback = (draggedIds, targetIndex) => {
-            // Round 35: reordering is off the table while a query is
+            // Reordering is off the table while a query is
             // live. The drop position is measured in DOM order, but a
             // ranked search displays in CSS order -- the index a card
             // LOOKS like it is at is not the index it has, so any move
@@ -4085,7 +4349,7 @@ class ComposerUI {
         section._missingEntryIds = this._missingEntryIds;
 
         this.rightPanel.append(container);
-        // Round 35: the section's no-results block -- BESIDE the rows
+        // The section's no-results block -- BESIDE the rows
         // like the library's (a child of this container would be walked
         // by the chunk filler and the drag-reorder wiring).
         this._secEmptyNode = el("div", "pc-search-empty");
@@ -4101,7 +4365,7 @@ class ComposerUI {
         // and empty container show immediately, cards fill in after).
         const refs = section.entries.map((e) => (e && e.prompt_ref) || "");
         return resolveForDisplay(refs)
-            // Layer B3: refs the library cannot resolve stand in with the
+            // Refs the library cannot resolve stand in with the
             // copy embedded in the loaded workflow (live library always
             // wins). Downstream -- the _missingEntryIds refresh, the
             // category strip, the cards themselves -- all read this one
@@ -4112,7 +4376,7 @@ class ComposerUI {
             // _applySectionSearchToggle -- the strip outlives this fill,
             // and its options are computed from exactly this map.
             this._secResolvedMap = resolvedMap;
-            // Round 35: the search score index, keyed by ENTRY ID (one
+            // The search score index, keyed by ENTRY ID (one
             // prompt can sit in a section several times -- the ref
             // cannot tell the copies apart, the id can). Built from
             // this same resolve, so the scorer sees exactly what the
@@ -4128,7 +4392,7 @@ class ComposerUI {
                     category: display?.category || [],
                 });
             }
-            // Round 26: this very map decided what every card in this
+            // This very map decided what every card in this
             // section looks like right now -- fold it into the alert
             // status for free, so a card resolving (or going missing)
             // updates its row's chip THE SAME MOMENT the card itself
@@ -4157,14 +4421,27 @@ class ComposerUI {
             // Eligibility is decided once, up front (exactly like the
             // `continue`s in the old synchronous loop), and the cards
             // themselves then land across animation frames through the
-            // ChunkedFiller -- hundreds of entries used to mean one long
-            // main-thread freeze before anything was visible.
+            // ChunkedFiller -- filling hundreds of entries synchronously
+            // would freeze the main thread before anything was visible.
             const eligible = [];
             for (const entry of section.entries) {
                 const display = resolvedMap[entry.prompt_ref] || null;
                 if (this.sectionSearchVisible) {
                     if (this.sectionSelectedCategory !== "All") {
-                        const cats = display?.category || [];
+                        // categoryMembershipFor (Favorite + folder
+                        // pseudo-category INCLUDED -- see its own
+                        // comment), NOT display?.category directly.
+                        // This pre-filter decides which entries even
+                        // get a card built at all for this render, so
+                        // it has to agree with _applySectionRow's live
+                        // filter (which already uses
+                        // categoryMembershipFor via entrySearchDataset)
+                        // on what "this entry's categories" means --
+                        // otherwise selecting a folder pseudo-category
+                        // discarded every entry here, before
+                        // _applySectionRow's own (correct) check ever
+                        // got a chance to run on anything.
+                        const cats = categoryMembershipFor(display);
                         if (!cats.includes(this.sectionSelectedCategory)) continue;
                     }
                     // Intersects with the category above rather than
@@ -4187,7 +4464,7 @@ class ComposerUI {
                         this.refreshRenderedEntry(entry);
                         this.refreshSectionCounter(section);
                         // Re-gate the count-dependent toolbar state on
-                        // every visibility flip (round 16b): Show-all
+                        // every visibility flip: Show-all
                         // always stays, Hide-all keeps the >=1-visible
                         // rule -- and if the counter's visible-only filter
                         // was on when this was the LAST visible card, the
@@ -4233,7 +4510,7 @@ class ComposerUI {
                         this.render();
                     },
                     onReplace: () => this.startReplacingEntry(section.id, entry.id),
-                    // Layer B5 affordance for "workflow copy" badges
+                    // Affordance for "workflow copy" badges
                     // (only meaningful when display.from_workflow, which
                     // is exactly when the badge renders).
                     onRestore: () => this.restoreEmbeddedEntry(entry),
@@ -4280,8 +4557,7 @@ class ComposerUI {
      * Single entry point for "a loaded workflow owns the live
      * composition": replaces sections, re-points the active section,
      * tells the preset toolbar to reconcile WITHOUT auto-loading over
-     * the restored state (noteWorkflowRestored -- see
-     * documents/Workflow_Restore_Design_Guide.md RC1), and renders.
+     * the restored state (noteWorkflowRestored), and renders.
      * render() itself syncs the hidden composer_state widget and the
      * preview, so both the queue payload and the visible UI agree with
      * the restored state immediately.
@@ -4292,14 +4568,14 @@ class ComposerUI {
      *   under, or null when it had none.
      * @param {object|null} snapshot - the workflow's pc_workflow_snapshot
      *   (validated by the caller), whose embedded prompt contents stand in
-     *   for any ref this machine's library cannot resolve (Layer B3).
+     *   for any ref this machine's library cannot resolve.
      */
     hydrateFromGraph(sections, presetName = null, snapshot = null) {
         this.applyWorkflowSnapshot(snapshot);
         this.state.sections = sections;
         this.state.presetName = presetName;
         this.state.activeSectionId = sections[0]?.id;
-        // The snapshot rides along so the toolbar can name a Layer-B2
+        // The snapshot rides along so the toolbar can name a
         // virtual preset after the workflow when no disk preset matches.
         this.presetToolbar.noteWorkflowRestored(presetName, snapshot);
         this.render();
@@ -4319,19 +4595,19 @@ class ComposerUI {
                 : null;
         this._workflowContents = contents;
         this.preview.setWorkflowContents(contents);
-        // C3 provenance travels INSIDE the snapshot: an executed string
+        // executed-output provenance travels INSIDE the snapshot: an executed string
         // saved with the workflow survives server restarts (the stash
         // itself does not) and is re-adopted on every load until a newer
         // run of this node overwrites it.
         if (snapshot && typeof snapshot.executed_prompt === "string") {
-            // Round 31: "" included -- an empty run is a real record;
+            // "" included -- an empty run is a real record;
             // only a MISSING key means "this node never ran here".
             this.applyExecutedOutput({
                 prompt: snapshot.executed_prompt,
                 seed: snapshot.executed_seed,
                 at: snapshot.executed_at,
             });
-            // Round 10 (user-caught): the embedded value is baked at
+            // The embedded value is baked at
             // QUEUE time, so the PNG that a run produces carries the
             // PREVIOUS adoption, never its own ("Edited" phantom on the
             // image you just made). A carried record proves this graph
@@ -4350,7 +4626,7 @@ class ComposerUI {
     }
 
     /**
-     * Layer B5: turn a "workflow copy" entry back into a live library
+     * Turn a "workflow copy" entry back into a live library
      * prompt -- same name, same text, categories carried, thumbnail-less
      * (.txt with pc_meta; the embedded copy never held image bytes).
      * No confirmation dialog: creating a prompt is cheap and reversible
@@ -4420,14 +4696,14 @@ class ComposerUI {
     }
 
     /**
-     * Layer C3 entry point: adopt an executed-output record from either
+     * the executed-output entry point: adopt an executed-output record from either
      * source -- the live WS fetch after a run, or the snapshot of a
      * loaded workflow ("what it said" survives saves and restarts this
      * way even though the server stash does not). Keeps the hidden
      * executed_prompt widget in step so the value rides widgets_values
      * too (the placeholder-visible channel, same trick as final_prompt).
      *
-     * Round 31: an EMPTY string is a real executed output (all sections
+     * An EMPTY string is a real executed output (all sections
      * off -> compose emits ""), adopted like any other. Only a missing/
      * non-string prompt means "no record".
      */
@@ -4462,7 +4738,7 @@ class ComposerUI {
     }
 
     /**
-     * Round 33 (press-and-hold on "Edited"): accept the CURRENT
+     * Press-and-hold on "Edited": accept the CURRENT
      * composition as what ran -- the chip's drift was inherited (a
      * re-adopted file record from before this browser session, say) and
      * the user is resolving it locally. Deliberately NOT a queue: the
@@ -4477,7 +4753,7 @@ class ComposerUI {
     }
 
     /**
-     * Round 33 (press-and-hold on "Reset Seed"): accept the CURRENT
+     * Press-and-hold on "Reset Seed": accept the CURRENT
      * seed value as the executed one (a non-numeric/absent widget
      * clears the record's seed, which also hides the chip -- "I am not
      * chasing any seed" is a legitimate answer).
@@ -4559,7 +4835,7 @@ class ComposerUI {
         const node = this.node;
         if (!node || node._pcDestroyed || node.id == null) return;
         try {
-            const record = await apiClient.getExecutedOutput(promptId, String(node.id));
+            const record = await apiClient.getExecutedOutput(promptId, String(node.id), PC_CLIENT_KEY);
             this.applyExecutedOutput(record);
         } catch (err) {
             const msg = String((err && err.message) || err || "");
@@ -4583,7 +4859,7 @@ class ComposerUI {
     /**
      * Startup-probe verdict: the /last_output endpoint itself is not
      * answering -- the classic shape of a server process that predates
-     * the C3 Python changes. Say so on every composer node immediately
+     * the executed-output Python changes. Say so on every composer node immediately
      * (tooltip explains; a later successful adopt clears it).
      */
     noteC3EndpointDown(msg) {
@@ -4597,52 +4873,467 @@ class ComposerUI {
      * save-time and queue-time readers can find it synchronously --
      * _lastComposedPreview for the snapshot extra, and the hidden
      * final_prompt widget so the value also rides in widgets_values (the
-     * channel an unknown-node placeholder can display; see design guide
-     * RC4). Also refreshes the composer_contents queue fallback, since
+     * channel an unknown-node placeholder can display).
+     * Also refreshes the composer_contents queue fallback, since
      * "what the preview just showed" is exactly the state both mirrors
      * must describe. Deliberately does NOT setDirtyCanvas: the mirror
      * follows an edit that already dirtied things, and stamping on every
      * debounce tick would make workflows look permanently unsaved.
      */
+    /**
+     * Make `id` the active (left-panel-focused) section, resetting
+     * whatever transient UI state doesn't make sense to carry over to a
+     * different section (an open edit panel, a live search/category/
+     * favorites filter, a multi-select, a replacement pick in flight,
+     * or the Library panel).
+     *
+     * Extracted from the left panel's own row-click handler (onSelect
+     * Section) so the PREVIEW text's click-to-select behavior (see
+     * _handlePreviewClick) can select a section exactly the same way a
+     * left-panel click does, rather than maintaining two copies of this
+     * reset list that could drift apart.
+     */
+    selectSection(id) {
+        // re-selecting the ALREADY-active section is a no-op
+        // -- every field this resets is already at its default, so the
+        // only thing a rebuild would do is flash the entry grid. The
+        // moment anything differs (an open edit panel, a live search/
+        // category/favorites filter, a selection to clear, a
+        // replacement pick in flight, or the Library panel to leave)
+        // there's work to do and the full path runs unchanged.
+        if (id === this.state.activeSectionId && !this.showLibraryPanel
+            && this.editTarget === null && this.selectedEntryIds.size === 0
+            && this.sectionSearchText === "" && this.sectionSelectedCategory === "All"
+            && !this.sectionFavoritesOnly && this._replacingEntryTarget === null) {
+            return;
+        }
+        this.editTarget = null;
+        this.showLibraryPanel = false;
+        this.selectedEntryIds.clear();
+        this.sectionSearchText = "";
+        this.sectionSelectedCategory = "All";
+        this.sectionFavoritesOnly = false;
+        // Navigating to a section implicitly cancels an in-progress
+        // "pick a replacement" flow (see startReplacingEntry) -- there's
+        // no sensible way to finish the pick once the Library panel
+        // that was showing it is gone.
+        this._replacingEntryTarget = null;
+        this.state.activeSectionId = id;
+        this.render();
+    }
+
     _mirrorComposedPreview(text) {
         this._lastComposedPreview = text;
         const widget = this.node.finalPromptWidget;
         if (widget && widget.value !== text) widget.value = text;
         this.syncComposerContents();
-        // Same/differs against the FRESHEST composition (C3 chip).
+        // Same/differs against the FRESHEST composition (executed-output chip).
         this._refreshExecutedChip();
+        // Both the "PREVIEW" title's rainbow letters AND the colored
+        // overlay track every completed render, not just the overlay --
+        // calling _renderColorizedPreview() alone would leave
+        // the title stuck on whatever it showed at the last color-picker
+        // edit (or never painted at all): adding/removing a section,
+        // toggling one's visibility, or loading a preset all change
+        // which colors exist WITHOUT going through the color picker's
+        // own onColorChange hook, and every one of those funnels through
+        // a completed render -- this is the one place that reliably
+        // catches all of them at once.
+        this._refreshPreviewColorState();
+    }
+
+    /**
+     * Repaint whatever depends on the preview-colorize toggle: the
+     * "PREVIEW" label's own rainbow letters, and the colored overlay
+     * over the preview text. Called on toggle click (immediate, no
+     * network) and on every completed preview render (so a section
+     * color edit or a composition change updates the paint live while
+     * the toggle stays ON -- see _mirrorComposedPreview).
+     */
+    _refreshPreviewColorState() {
+        this._applyPreviewLabelColors();
+        this._renderColorizedPreview();
+    }
+
+    /**
+     * Paint (or un-paint) each letter of the "PREVIEW" label.
+     *
+     * ON: cycles the EXISTING section colors across the letters, in
+     * section order, wrapping if there are fewer colors than letters
+     * (7, for "PREVIEW") -- "use existing colors", rather than
+     * inventing a fixed rainbow palette that could clash with or
+     * duplicate a section's own accent. Falls back to the info color
+     * when there are no sections to draw a color from (a brand new/
+     * emptied composition), so the label is never left blank or an
+     * unstyled default while ON.
+     * OFF: every inline color is cleared, which lets the CSS default
+     * (the plain dim label color) show through exactly as it did
+     * before this became a toggle.
+     */
+    _applyPreviewLabelColors() {
+        if (!this.previewColorOn) {
+            for (const span of this._previewLabelLetterEls) span.style.color = "";
+            return;
+        }
+        // Enabled ("visible") sections only -- the section-row eye
+        // toggle is what "visible" means at the section level (see
+        // section.enabled throughout ui_panels.js/ui_preview.js); a
+        // disabled section contributes nothing to the composed prompt
+        // (getSectionBlocks skips it too), so its color has no business
+        // showing up in the preview's own title either.
+        const colors = this.state.sections
+            .filter((section) => section.enabled)
+            .map((section) => section.color)
+            .filter((color) => typeof color === "string" && color.trim());
+        const fallback = "var(--pc-info)";
+        this._previewLabelLetterEls.forEach((span, i) => {
+            span.style.color = colors.length ? colors[i % colors.length] : fallback;
+        });
+    }
+
+    /**
+     * Build (or clear) the colored overlay showing the live preview
+     * text in each section's own accent color.
+     *
+     * Painted from getSectionBlocks() -- the SAME per-section walk
+     * _composeLocally() joins into the plain preview string (see
+     * ui_preview.js) -- rather than from the server's final joined
+     * string, because once blocks are joined with plain spaces there
+     * is no reliable way back to "which word came from which section"
+     * (a separator character can coincide with real content, the same
+     * text can appear from two different sections, etc). This can
+     * differ from the exact server string in one place: a WARM,
+     * randomized section reusing the server's last authoritative
+     * choice shows this mirror's own (seed-hashed) pick instead --
+     * the same documented approximation _composeLocally already
+     * carries; a resolving network round-trip corrects it moments
+     * later, same as the plain preview does.
+     *
+     * Locked-prompt/no-color sections fall back to the info color,
+     * same rule and same reason as the label (see
+     * _applyPreviewLabelColors) -- though in practice every section
+     * factory hands out a color, so this mostly guards a hand-edited
+     * or future section shape that doesn't.
+     */
+    _renderColorizedPreview() {
+        const active = this.previewColorOn;
+        this.previewTextWrap.classList.toggle("pc-preview-colorized-active", active);
+        if (!active) {
+            this.previewColorLayer.textContent = "";
+            return;
+        }
+        const userPromptValue = this.node.userPromptWidget ? this.node.userPromptWidget.value : "";
+        const linked = resolveLinkedString(this.node);
+        const blocks = this.preview.getSectionBlocks(this.state, linked != null ? linked : userPromptValue);
+
+        this.previewColorLayer.textContent = "";
+        blocks.forEach((block, blockIndex) => {
+            // The section-name label prefix (show_label) sits OUTSIDE
+            // every entry run (see getSectionBlocks's own labelPrefix
+            // field) -- there's no single entry it belongs to, only the
+            // section as a whole. Rendered in the section's own color
+            // so it still reads as part of the same colored block, but
+            // as a plain (non entry-hoverable) span: hovering it
+            // doesn't highlight any one entry, since it isn't one --
+            // clicking it still selects the section (dataset.pcSectionId
+            // is set on every span in this block, entries and label
+            // alike; see _handlePreviewClick), which is the one thing
+            // it IS "part of".
+            if (block.labelPrefix) {
+                const labelSpan = el("span", "pc-preview-word", { text: block.labelPrefix });
+                labelSpan.style.color = block.color || "var(--pc-info)";
+                labelSpan.dataset.pcSectionId = block.sectionId;
+                this.previewColorLayer.appendChild(labelSpan);
+            }
+            block.entries.forEach((run, runIndex) => {
+                const span = el("span", "pc-preview-word", { text: run.text });
+                span.style.color = block.color || "var(--pc-info)";
+                // Entry-level addressing for hover-highlight and
+                // click-to-select (see the mouseover/click listeners
+                // wired once on previewColorLayer itself, in the
+                // constructor): every run from the SAME entry across
+                // this block shares entryId, so a multi-word entry
+                // still highlights as one unit even though it is one
+                // span here already (an entry currently always
+                // produces exactly one run/span; the shared-id grouping
+                // is what makes future multi-span entries safe too).
+                // A null entryId (the locked Prompt section's synthetic
+                // run -- there's no library entry behind typed text)
+                // still gets a sectionId, so hovering/clicking it still
+                // highlights/selects the Prompt section itself.
+                span.dataset.pcSectionId = block.sectionId;
+                if (run.entryId != null) span.dataset.pcEntryId = run.entryId;
+                this.previewColorLayer.appendChild(span);
+                if (runIndex < block.entries.length - 1) {
+                    // The join space BETWEEN two entries in the same
+                    // section: not part of either entry's own span, but
+                    // still carries the section id so hovering the gap
+                    // between two words of the same block doesn't drop
+                    // out of the highlight/pointer-cursor state.
+                    const gap = el("span", "pc-preview-word", { text: " " });
+                    gap.style.color = block.color || "var(--pc-info)";
+                    gap.dataset.pcSectionId = block.sectionId;
+                    this.previewColorLayer.appendChild(gap);
+                }
+            });
+            if (block.endSeparator) {
+                // The section's end-separator character ("." or ",")
+                // sits OUTSIDE every entry (see getSectionBlocks) -- it
+                // would be dropped entirely from the overlay if skipped,
+                // and a section ending in a period would visibly
+                // show one fewer character than the real textarea
+                // underneath it. Rendered the same way as the label
+                // prefix: same section color, carries data-pc-section-id
+                // so clicking it still selects the section, but
+                // deliberately WITHOUT data-pc-entry-id -- this
+                // character never joins an entry's hover-highlight (the
+                // CSS's .pc-preview-word[data-pc-entry-id] selector is
+                // what makes a span interactive/highlightable at all,
+                // and this span intentionally doesn't qualify).
+                const endSpan = el("span", "pc-preview-word", { text: block.endSeparator });
+                endSpan.style.color = block.color || "var(--pc-info)";
+                endSpan.dataset.pcSectionId = block.sectionId;
+                this.previewColorLayer.appendChild(endSpan);
+            }
+            if (blockIndex < blocks.length - 1) {
+                // A literal space TEXT NODE between BLOCKS (sections) --
+                // exactly what _composeLocally joins with, so the
+                // overlay wraps at the same points the plain textarea
+                // underneath it does. Deliberately a bare text node,
+                // not a span: the gap between two DIFFERENT sections'
+                // text belongs to neither one, so it carries no
+                // pcSectionId and hovering/clicking it does nothing
+                // (see _handlePreviewHover/_handlePreviewClick).
+                this.previewColorLayer.appendChild(document.createTextNode(" "));
+            }
+        });
+        // Rebuilding the overlay's children resets its own scrollTop to
+        // 0 (a fresh DOM subtree always starts unscrolled) -- realign it
+        // to wherever the real textarea currently sits, so re-painting
+        // mid-scroll (e.g. turning the toggle ON while already scrolled
+        // down, or a composition update while scrolled) doesn't snap
+        // the visible overlay back to the top for a frame.
+        this.previewColorLayer.scrollTop = this.previewText.scrollTop;
+        this.previewColorLayer.scrollLeft = this.previewText.scrollLeft;
+        // New content can newly trigger (or newly remove) the
+        // textarea's own scrollbar, which changes its gutter width --
+        // re-measure so the overlay's compensating padding
+        // (see syncOverlayGutter) never lags one render behind.
+        if (this._syncPreviewOverlayGutter) this._syncPreviewOverlayGutter();
+    }
+
+    /**
+     * The identity a colorized-preview word span is addressed by: an
+     * entry id when the span stands for a library entry's text, or (for
+     * the locked Prompt section's entry-less synthetic span) just the
+     * section id. Returns null for a span that isn't independently
+     * interactive at all -- the inter-entry join gap, the section-name
+     * label prefix, or the plain text-node spacing between two
+     * different sections' blocks -- which is also what
+     * .pc-preview-word[data-pc-entry-id] / [data-pc-section-id=
+     * "prompt-locked"] in the CSS keys pointer-events/cursor off of, so
+     * "is this span interactive" is decided in exactly one place.
+     */
+    _previewWordIdentity(span) {
+        if (!span || !span.dataset) return null;
+        if (span.dataset.pcEntryId) return { entryId: span.dataset.pcEntryId, sectionId: span.dataset.pcSectionId };
+        if (span.dataset.pcSectionId === "prompt-locked") return { entryId: null, sectionId: span.dataset.pcSectionId };
+        return null;
+    }
+
+    /**
+     * Highlight every span belonging to the SAME entry as the one under
+     * the cursor (mouseover), or clear the highlight when the cursor
+     * leaves it (mouseout) -- "hovering a PART of a prompt highlights
+     * the WHOLE prompt", not just the single span the pointer happens
+     * to be over. In the current data model an entry is always exactly
+     * one span (see getSectionBlocks), so this mostly toggles one
+     * class on one element; matching by data-pc-entry-id (rather than
+     * capturing "the span the mouse is over" and calling it done) is
+     * what keeps this correct if an entry's text is ever split across
+     * more than one span later (e.g. to color-highlight a search match
+     * inside it) without this method needing to change at all.
+     */
+    _handlePreviewHover(ev) {
+        const span = ev.target.closest ? ev.target.closest(".pc-preview-word") : null;
+        const identity = this._previewWordIdentity(span);
+        if (ev.type === "mouseout") {
+            if (identity) this._setPreviewHoverHighlight(null);
+            return;
+        }
+        this._setPreviewHoverHighlight(identity);
+    }
+
+    /**
+     * Apply (or clear, for a null identity) the hover-highlight class
+     * across every span in previewColorLayer sharing the given entry
+     * (or, for the locked Prompt section, section) identity. Always
+     * clears every OTHER span first, so moving the cursor directly from
+     * one entry's span to another's never leaves the previous one stuck
+     * highlighted (mouseover on the new span fires before mouseout on
+     * the old one in that case, so a naive "just add to the new one"
+     * would double-highlight for a frame).
+     */
+    _setPreviewHoverHighlight(identity) {
+        const spans = this.previewColorLayer.querySelectorAll(".pc-preview-word-hover");
+        for (const span of spans) span.classList.remove("pc-preview-word-hover");
+        if (!identity) return;
+        const selector = identity.entryId
+            ? `.pc-preview-word[data-pc-entry-id="${CSS.escape(identity.entryId)}"]`
+            : `.pc-preview-word[data-pc-section-id="${CSS.escape(identity.sectionId)}"]:not([data-pc-entry-id])`;
+        for (const span of this.previewColorLayer.querySelectorAll(selector)) {
+            span.classList.add("pc-preview-word-hover");
+        }
+    }
+
+    /**
+     * Clicking any part of an entry's text in the colorized preview
+     * selects that entry's PARENT SECTION in the left panel -- the same
+     * "select a section" ComposerUI already does for a left-panel row
+     * click (see selectSection). There is no per-entry selection
+     * target in this app (the left panel selects sections, not
+     * individual entries within one), so "select the related section"
+     * is the correct and complete behavior, not a placeholder
+     * for something finer-grained.
+     * A click that lands on non-interactive overlay space (the label
+     * prefix's OWN span still carries a section id and is handled the
+     * same way; the inter-entry gap or the space between two different
+     * sections' blocks carry no identity at all and are ignored here)
+     * simply falls through to the textarea underneath -- there is
+     * nothing this handler needs to do for those, and (see
+     * .pc-preview-colorized's pointer-events:none on the container)
+     * the click already reached the textarea directly in that case
+     * rather than this handler at all.
+     */
+    _handlePreviewClick(ev) {
+        const span = ev.target.closest ? ev.target.closest(".pc-preview-word") : null;
+        const sectionId = span && span.dataset ? span.dataset.pcSectionId : null;
+        if (!sectionId) return;
+        const entryId = span.dataset.pcEntryId || null;
+        this.selectSection(sectionId);
+        if (entryId) this.scrollPreviewEntryIntoView(entryId);
+    }
+
+    /**
+     * Scroll the (just-selected) section's entry list so the given
+     * entry's own card/row is visible -- the follow-through on clicking
+     * an entry's text in the colorized preview: selecting its section
+     * alone can still leave the entry itself scrolled off-screen in a
+     * long list, which defeats the point of "click to find this entry".
+     *
+     * selectSection() just triggered a render(), and renderEntryGrid()
+     * fills the entry list ASYNCHRONOUSLY (see its own comment) -- the
+     * card for `entryId` may not exist in the DOM yet the instant this
+     * runs. Awaiting this._lastRenderSettled (set at the tail of every
+     * render(), see there) is what makes this reliable rather than a
+     * "usually works" race: it resolves only once THIS render's content
+     * fill has actually landed, and resolves to nothing (a no-op) if a
+     * newer render superseded this one first -- the same supersede
+     * guard render()'s own scroll-restore chain uses, reused here
+     * rather than duplicated.
+     */
+    async scrollPreviewEntryIntoView(entryId) {
+        const renderSeq = this._renderSeq;
+        await this._lastRenderSettled;
+        if (renderSeq !== this._renderSeq) return; // superseded meanwhile
+
+        const jumpToCard = () => {
+            if (renderSeq !== this._renderSeq) return false; // superseded meanwhile
+            const card = this.rightPanel.querySelector(`.pc-browse-section [data-entry-id="${CSS.escape(entryId)}"]`);
+            if (!card) return false; // filtered out by a live search/category, or the section changed underneath us
+            card.scrollIntoView({ block: "nearest", inline: "nearest" });
+            return true;
+        };
+
+        // render()'s OWN scroll-restore chain doesn't stop at
+        // _lastRenderSettled's resolution either: ScrollPreserver.restore()
+        // (see dom_utils.js) re-applies its captured/persisted position
+        // once immediately AND THEN AGAIN across a double
+        // requestAnimationFrame, specifically to correct for layout that
+        // still settles a frame or two after the content fill promise
+        // resolves. That means restore()'s two rAF passes fire AFTER the
+        // very microtask this method already waited for -- so a single
+        // scrollIntoView() here looked right for an instant and then got
+        // silently overwritten back to wherever the freshly-opened
+        // section's memory (nothing captured yet -> the top) says it
+        // belongs, which is exactly the "works on the second click"
+        // symptom: the FIRST click's section has no prior scroll memory
+        // to fight, so restore()'s rAF passes have somewhere "correct" to
+        // reset it TO; the second click's section already has this
+        // method's own position captured as history by then.
+        // Matching the same timing (jump now, then again after the same
+        // double rAF) makes this scroll the one that's still standing once
+        // every pass -- ours and render()'s -- has run.
+        jumpToCard();
+        requestAnimationFrame(() => {
+            jumpToCard();
+            requestAnimationFrame(jumpToCard);
+        });
     }
 
     /**
      * Mirror the embedded/fallback content the PREVIEW currently relies
      * on into the hidden composer_contents widget, so Python's compose()
-     * can stand in for refs the live library cannot resolve (Layer B4).
-     * Same selection + budget as the save-side snapshot (buildSnapshot-
-     * Payload filters to USED refs, cheapest-first) -- the queue and the
-     * file therefore always carry the same copy set. Cheap and fully
-     * synchronous; safe to call after every completed render.
+     * can stand in for refs the live library cannot resolve.
+     *
+     * Uses usedPromptRefsForQueue() (composer_state.js), NOT the general
+     * usedPromptRefs() the save-time snapshot uses -- see that function's
+     * own docstring for why the two must differ: this widget is a literal
+     * input ComfyUI hashes into the node's cache signature on every queue
+     * attempt, so a hidden entry's content changing (rename, edit, or
+     * anything else) must NOT change what gets embedded here, the same
+     * requirement serializeForQueue() already enforces for composer_state
+     * itself. Building the {ref: {name, prompt, category}} map directly
+     * here (rather than routing through buildSnapshotPayload, which is
+     * hardwired to the visibility-blind usedPromptRefs()) keeps that
+     * guarantee without touching buildSnapshotPayload's own behavior for
+     * its real caller, the save-time workflow snapshot.
+     *
+     * Same cost budget as the save-side snapshot (cheapest-first, capped
+     * at PC_MAX_SNAPSHOT_CONTENTS_CHARS) so the two never disagree on HOW
+     * MUCH gets embedded, only on which refs are eligible at all. Cheap
+     * and fully synchronous; safe to call after every completed render.
      */
     syncComposerContents() {
         const widget = this.node.composerContentsWidget;
         if (!widget) return;
         let value = "{}";
         try {
-            const payload = buildSnapshotPayload({
-                sections: this.state.sections,
-                contents: this.preview.getCachedContents(),
-                maxContentsChars: PC_MAX_SNAPSHOT_CONTENTS_CHARS,
-            });
-            value = JSON.stringify(payload.contents);
+            const used = usedPromptRefsForQueue(this.state.sections);
+            const cachedContents = this.preview.getCachedContents();
+            const candidates = [];
+            for (const [ref, entry] of cachedContents) {
+                if (!used.has(ref) || !entry || typeof entry.prompt !== "string") continue;
+                const cost =
+                    ref.length +
+                    entry.prompt.length +
+                    (entry.name ? entry.name.length : 0) +
+                    JSON.stringify(entry.category || []).length;
+                candidates.push({ ref, entry, cost });
+            }
+            candidates.sort((a, b) => a.cost - b.cost);
+            const collected = {};
+            let bytes = 0;
+            for (const { ref, entry, cost } of candidates) {
+                if (bytes + cost > PC_MAX_SNAPSHOT_CONTENTS_CHARS) continue;
+                collected[ref] = {
+                    name: entry.name || "",
+                    prompt: entry.prompt,
+                    category: Array.isArray(entry.category) ? [...entry.category] : [],
+                };
+                bytes += cost;
+            }
+            value = JSON.stringify(collected);
         } catch (err) {
-            // Worst case degrades to "no fallback" -- the pre-B4
-            // behavior -- never a broken queue payload.
+            // Worst case degrades to "no fallback",
+            // never a broken queue payload.
             console.error("Prompt Composer: composer_contents sync failed", err);
         }
         if (widget.value !== value) widget.value = value;
     }
 
     /**
-     * The self-contained payload embedded at save (Layer B write side).
+     * The self-contained payload embedded at save.
      * All synchronous by design -- onSerialize cannot await -- so it
      * reports what the preview pipeline last managed to resolve, which
      * (the preview runs on every render) in practice is everything the
@@ -4655,12 +5346,12 @@ class ComposerUI {
             nowIso: new Date().toISOString(),
             workflowName: currentWorkflowName(),
             presetName: this.state.presetName,
-            sections: this.state.sections,
+            sections: stripTransientSectionFields(this.state.sections),
             contents: this.preview.getCachedContents(),
             finalPrompt: this._lastComposedPreview || (this.previewText ? this.previewText.value : ""),
             seed: Number(this.node.seedWidget && this.node.seedWidget.value) || 0,
             userPrompt: (this.node.userPromptWidget && this.node.userPromptWidget.value) || "",
-            // C3: "what actually ran" -- only when a run completed (or a
+            // executed-output: "what actually ran" -- only when a run completed (or a
             // loaded workflow already carried it); buildSnapshotPayload
             // omits the keys entirely when this is null.
             executed: this._executed,
@@ -4670,7 +5361,16 @@ class ComposerUI {
 
     syncWidget() {
         if (this.node.composerStateWidget) {
-            this.node.composerStateWidget.value = this.state.serialize();
+            // See ComposerState.serializeForQueue()'s own docstring:
+            // this is the queued/hashed widget value, deliberately NOT
+            // the full serialize() dump, so that structural-only edits
+            // (an empty section, a hidden entry's prompt being renamed,
+            // a reorder that doesn't change the joined text, ...) don't
+            // change this string and force ComfyUI to treat the node as
+            // "changed" independently of whatever IS_CHANGED() computes
+            // on the Python side (see that method's docstring for why
+            // the raw widget value matters at all here).
+            this.node.composerStateWidget.value = this.state.serializeForQueue();
         }
     }
 }
@@ -4704,8 +5404,15 @@ const USER_PROMPT_MAX_HEIGHT = 128;
 app.registerExtension({
     name: "PromptComposer.UI",
     setup() {
-        console.info(`Prompt Composer ${PC_VERSION} (build ${PC_BUILD}) loaded (C3 = executed-output capture; see /prompt_composer/c3_status)`);
-        // C3: one "executed" listener for the page; it fetches for
+        apiClient.getVersion()
+            .then((info) => {
+                if (info && info.version) PC_VERSION = info.version;
+                console.info(`Prompt Composer ${PC_VERSION} (build ${PC_BUILD}) loaded (C3 = executed-output capture; see /prompt_composer/c3_status)`);
+            })
+            .catch(() => {
+                console.info(`Prompt Composer ${PC_VERSION}? (build ${PC_BUILD}) loaded -- version endpoint unavailable`);
+            });
+        // executed-output: one "executed" listener for the page; it fetches for
         // whichever PC_NODES member just finished its own compose. The
         // universal fallback (status polling) starts with the first
         // node, so it works even on a build where setup() or any WS
@@ -4759,7 +5466,36 @@ app.registerExtension({
             this.composerUI = ui;
 
             const domWidget = this.addDOMWidget("prompt_composer_ui", "div", ui.root, {
-                getValue: () => ui.state.serialize(),
+                // getValue() is what graphToPrompt() reads into
+                // node["inputs"]["prompt_composer_ui"] -- a REAL,
+                // literal input ComfyUI folds into this node's
+                // execution-cache signature on every queue attempt,
+                // exactly like composer_state/composer_contents,
+                // DESPITE this widget never being declared in Python's
+                // INPUT_TYPES at all (ComfyUI's cache signature reads
+                // every key in node["inputs"], full stop -- it has no
+                // notion of "but Python never asked for this one").
+                // serializeForQueue() (not the raw serialize())
+                // is the SAME canonical, output-
+                // only-relevant string composer_state's own widget
+                // carries (see ComposerState.serializeForQueue()'s own
+                // docstring in composer_state.js) -- structural-only
+                // edits (an empty/disabled section, a hidden entry
+                // being added/renamed/re-pointed, a reorder that
+                // doesn't change the joined text) must not change this
+                // string either, or this ONE widget alone would keep
+                // forcing a re-run no matter how stable every other
+                // input on this node is made. That was the actual,
+                // final leak: every other literal input on this node
+                // (composer_state, composer_contents, seed) had already
+                // been fixed, and a rename/disable/hide/add-section
+                // STILL forced a re-run, because THIS widget -- easy to
+                // miss since it exists purely to host the editor's DOM,
+                // has no INPUT_TYPES entry, and doesn't show up next to
+                // the other hidden widgets in this file -- was still
+                // computing its literal value from the full, unfiltered
+                // structural dump on every queue.
+                getValue: () => ui.state.serializeForQueue(),
                 setValue: () => {},
             });
             this._pcDomWidget = domWidget;
@@ -4774,13 +5510,13 @@ app.registerExtension({
             // run, and the frontend renders widgets_values positionally:
             // this near-tail slot is the channel through which a user
             // without this node reads the prompt that made the image
-            // (design guide C1/RC4). Hidden on the real node: the
+            // Hidden on the real node: the
             // PREVIEW bar already shows it.
-            this.finalPromptWidget = this.addWidget("text", "final_prompt", "", () => {}, { multiline: true });
+            this.finalPromptWidget = this.addWidget("text", "final_prompt", "", () => {}, { multiline: true, serialize: false });
             this.finalPromptWidget.hidden = true;
             this.finalPromptWidget.computeSize = () => [0, -4];
 
-            // Layer B4's queue-side companion: the JSON map of prompt
+            // Queue-side companion: the JSON map of prompt
             // copies the loaded workflow embedded, delivered to Python's
             // compose() as the hidden `composer_contents` INPUT_TYPES
             // input (the same widget-name -> hidden-input channel
@@ -4792,7 +5528,7 @@ app.registerExtension({
             this.composerContentsWidget.hidden = true;
             this.composerContentsWidget.computeSize = () => [0, -4];
 
-            // Layer C3: the node's LITERAL last-executed output, kept
+            // The node's LITERAL last-executed output, kept
             // fresh by applyExecutedOutput (WS fetch after a run, or a
             // loaded snapshot's executed_prompt). Not a queue input --
             // pure provenance that also rides widgets_values so an
@@ -4801,11 +5537,23 @@ app.registerExtension({
             // Append-only rule: this is now the tail; only hidden
             // mirrors may follow it. Hidden on the real node; the chip
             // + snapshot carry it there.
-            this.executedPromptWidget = this.addWidget("text", "executed_prompt", "", () => {}, { multiline: true });
+            this.executedPromptWidget = this.addWidget("text", "executed_prompt", "", () => {}, { multiline: true, serialize: false });
             this.executedPromptWidget.hidden = true;
             this.executedPromptWidget.computeSize = () => [0, -4];
 
-            PC_NODES.add(this); // C3 execution listeners find live nodes here
+            // the executed-output tab disambiguator, delivered to Python's compose()
+            // through the hidden `client_key` input. Re-stamped with THIS
+            // page's key on every configure() too (see below): a saved
+            // workflow carries whatever key the session that saved it
+            // had, and two tabs opening that same file must not inherit
+            // one shared address. Append-only rule: new hidden mirrors go
+            // at the tail, so widgets_values stays positionally stable
+            // for every workflow saved before this widget existed.
+            this.clientKeyWidget = this.addWidget("text", "client_key", PC_CLIENT_KEY, () => {}, { multiline: false });
+            this.clientKeyWidget.hidden = true;
+            this.clientKeyWidget.computeSize = () => [0, -4];
+
+            PC_NODES.add(this); // executed-output execution listeners find live nodes here
             probeC3EndpointOnce(); // first node on the page checks the server half
             primeC3Baseline(this); // THIS node adopts only outputs newer than its birth
 
@@ -4851,7 +5599,7 @@ app.registerExtension({
                 }
             };
 
-            // Round 12: watch the user_prompt LINK. This watcher owns
+            // Watch the user_prompt LINK. This watcher owns
             // ONLY the link dimension: while UNLINKED its signature is a
             // constant, so it never interferes with the textarea's own
             // render path (no double recompose per keystroke); while
@@ -4906,7 +5654,7 @@ app.registerExtension({
                 if (onRemoved) onRemoved.apply(this, arguments);
             };
 
-            // C3 canonical trigger. The frontend calls onExecuted(detail)
+            // executed-output canonical trigger. The frontend calls onExecuted(detail)
             // DIRECTLY on the instance that just ran (the same hook that
             // refreshes image/preview tiles), so there is no node-id string
             // to match and no WS event-shape to guess -- which is exactly
@@ -4980,15 +5728,19 @@ app.registerExtension({
         nodeType.prototype.onSerialize = function (o) {
             if (onSerialize) onSerialize.apply(this, arguments);
             if (this.composerUI) {
-                o.pc_state = this.composerUI.state.sections;
+                // See stripTransientSectionFields's docstring: sections
+                // carry live UI-runtime fields (a function among them)
+                // that must never reach anything LiteGraph or the server
+                // might clone.
+                o.pc_state = stripTransientSectionFields(this.composerUI.state.sections);
                 o.pc_preset_name = this.composerUI.state.presetName;
                 o.pc_split = this.composerUI.splitFraction;
                 o.pc_library_color = this.composerUI.libraryColor;
-                // Layer C1: the composed string, as a named extra (tooling
+                // The composed string, as a named extra (tooling
                 // reads extras by key; the placeholder path uses the
                 // positional final_prompt widget instead -- both are kept).
                 o.pc_final_prompt = this.composerUI._lastComposedPreview || "";
-                // Layer B1: the self-contained payload (structure + resolved
+                // The self-contained payload (structure + resolved
                 // content + final prompt) that lets this workflow be opened
                 // where the library has none of its prompts. Wrapped in a
                 // try: a snapshot failure must never block saving the node
@@ -5004,6 +5756,12 @@ app.registerExtension({
         const onConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function (o) {
             if (onConfigure) onConfigure.apply(this, arguments);
+            // LiteGraph has just applied widgets_values, which includes
+            // whatever client_key the session that SAVED this workflow
+            // used. Stamp this page's key back over it: the whole point
+            // of the key is that two tabs -- even two tabs holding the
+            // same saved file -- address different stash entries.
+            if (this.clientKeyWidget) this.clientKeyWidget.value = PC_CLIENT_KEY;
             if (!this.composerUI) return;
             if (typeof o.pc_library_color === "string") {
                 this.composerUI.libraryColor = o.pc_library_color;
@@ -5039,12 +5797,12 @@ app.registerExtension({
                 this._pcRestoredFromGraph = true; // stops the afterConfigureGraph sweep double-hydrating
                 this.composerUI.hydrateFromGraph(sections, presetName, snapshot);
             }
-            // C3 third channel: a graph save whose pc_* extras were
+            // executed-output third channel: a graph save whose pc_* extras were
             // stripped still kept widgets_values, so the executed string
             // can survive there too. Only adopted when nothing richer
             // came through the snapshot (which carries seed/at as well).
             const execWidgetValue = this.executedPromptWidget && this.executedPromptWidget.value;
-            // Round 31: the sentinel decodes to an executed ""; a plain
+            // The sentinel decodes to an executed ""; a plain
             // "" stays what it always was -- a never-run node's default.
             const execWidgetPrompt = execWidgetValue === PC_EMPTY_EXECUTED_MARK
                 ? ""

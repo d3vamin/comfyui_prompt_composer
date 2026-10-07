@@ -4,7 +4,7 @@
  * The measurement machinery behind buildOverflowBadgeRow (category pill
  * rows: as many badges as fit show whole, the LAST one shown clips with
  * an ellipsis, and only what follows it collapses into a "+N" pill --
- * round 57's grammar, see planVisibleBadges).
+ * see planVisibleBadges).
  *
  * Why this exists: the original fit ran PER ROW and read layout in
  * between its writes. Each `clientWidth`/`scrollWidth` read forces a
@@ -71,10 +71,10 @@ const probeFont = { family: null, lineHeight: null }; // what the probe CURRENTL
 const CLIP_MIN = 18;
 
 /**
- * Round 57 badge grammar: show AS MANY whole badges as fit, and let the
+ * Badge grammar: show AS MANY whole badges as fit, and let the
  * LAST badge shown be the one that clips -- `Extra` `Light`
- * `last categ...` `[+2]`. (Round 56's "only the first badge, clipped"
- * wasted the row on multi-category prompts; the never-surrender-the-
+ * `last categ...` `[+2]`. (Showing only the first badge, clipped,
+ * would waste the row on multi-category prompts; the never-surrender-the-
  * seat principle survives, it just moved to the END of the visible
  * prefix.)
  *
@@ -120,7 +120,7 @@ export function planVisibleBadges(items, widthOf, overflowWidthOf, gap, availabl
         prefix -= widths[k - 1];
     }
     // Even k=1 cannot pay its tail: the first badge clips alone with the
-    // pill -- a sliver if it must (round 56's seat doctrine), never zero.
+    // pill -- a sliver if it must, never zero.
     return { visible: 1, clipIndex: 0, overflow: n - 1 };
 }
 
@@ -318,10 +318,10 @@ function overflowWidthFor(remaining) {
    CSS box in .pc-fav-star (both seats share it now); the list-variant star
    is display:none while off, so the pills sit flush left and the reveal
    PUSHES them right -- into exactly this reserved space, which is why the
-   push can never overflow (round 58: the push is the user's wanted
+   push can never overflow (the push is intended
    behavior; fitting against the star-present state keeps the plan honest
-   in the worst case). The coupling is test-pinned in
-   verify_workflow_restore -- resize one, the pin fails. Grid cards are
+   in the worst case). The two must stay in step:
+   resize one, resize the other. Grid cards are
    untouched: their star floats OUTSIDE the row and reserves its room via
    CSS padding instead, which styleContext already deducts. */
 const FAV_PIN_W = 14;
@@ -362,7 +362,7 @@ function flushBadgeFits() {
         toPlan.push(row);
         if (available > 0) {
             for (const text of st.items) if (!badgeWidths.has(widthKey(text))) texts.add(text);
-            // Round 57 put the pill's width back into the plan's cost.
+            // The overflow pill's width counts toward the plan's cost.
             if (st.items.length > 1) needOverflow = true;
         }
     }

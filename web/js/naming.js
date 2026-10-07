@@ -9,7 +9,7 @@
  *     functions in server/library_store.py. The two MUST agree exactly:
  *     the server writes `prompt_data` filenames, the client decodes refs
  *     for display (dead refs in presets, "is missing" dialogs). See
- *     Naming_Correction_Rules.md for the spec both sides implement.
+ *     the naming rules that both sides implement.
  *
  *  2. The unified trailing-number collision convention (collisionSuffix /
  *     applyCollisionSuffix / lowestFreeNumber / dedupeName /
@@ -65,7 +65,6 @@ export function randomColor() {
 
 // ---------------------------------------------------------------------------
 // The unified trailing-number collision convention
-// (Naming_Correction_Rules.md section 4)
 //
 // One convention, every name space:
 //   - section names (dedupeName / generateUniqueName, via composer_state.js)
@@ -219,8 +218,7 @@ function finalizePromptName(text) {
 }
 
 /**
- * Raw editor input -> corrected Prompt Name (Naming_Correction_Rules.md
- * section 2). Never returns empty: input with no usable starting
+ * Raw editor input -> corrected Prompt Name. Never returns empty: input with no usable starting
  * character falls back to `fallback`.
  */
 export function correctPromptName(raw, fallback = PROMPT_NAME_FALLBACK) {

@@ -1,8 +1,7 @@
 """
 image_utils.py
 
-Image decoding/sanitizing helpers, lifted (logic unchanged) from the
-earlier server_routes.py implementation. This is storage-model-agnostic:
+Image decoding/sanitizing helpers. They are storage-model-agnostic:
 whether the sanitized bytes end up embedded in a prompt_data PNG
 (server/library_store.py) or served back to the frontend, the same
 untrusted-input handling applies.
@@ -27,11 +26,28 @@ treat all incoming image bytes as untrusted input:
 """
 
 import io
+import logging
 
 from PIL import Image, ImageOps
 
+log = logging.getLogger("prompt_composer")
+
 MAX_INPUT_IMAGE_BYTES = 20 * 1024 * 1024  # 20 MB safety cap
 ALLOWED_IMAGE_FORMATS = {"PNG", "JPEG", "WEBP"}
+
+# Decompression-bomb ceiling. A 20 MB PNG can legally decode to tens of
+# GIGApixels: the byte cap above says nothing about how much memory the
+# DECODED image needs. 64 megapixels (~8000x8000) is far beyond anything
+# that could sensibly be dropped in as a 256px thumbnail source, and it
+# is checked against the header's declared size BEFORE any pixel data is
+# read, so a bomb is refused rather than rasterized.
+MAX_IMAGE_PIXELS = 64_000_000
+
+# Pillow's own global guard, pinned rather than left at its default so
+# the limit is explicit and identical on every install. Pillow warns past
+# this value and raises Image.DecompressionBombError past 2x it; we do
+# our own stricter check below and catch its error by name either way.
+Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
 
 def sanitize_image_bytes(raw_bytes: bytes, square_size: int, min_dimension: int | None = None) -> bytes:
@@ -62,7 +78,15 @@ def sanitize_image_bytes(raw_bytes: bytes, square_size: int, min_dimension: int 
         img.verify()  # sanity check container integrity
         # verify() invalidates the file pointer/object; reopen to actually use it
         img = Image.open(io.BytesIO(raw_bytes))
+        # Image.open() only parses the HEADER, so img.size is known here
+        # while no pixel data has been decoded yet -- this is the one
+        # moment a decompression bomb can be refused for free.
+        _reject_if_oversized(img.size)
         img.load()
+    except Image.DecompressionBombError as exc:
+        raise ValueError(f"Image is too large to decode safely: {exc}") from exc
+    except ValueError:
+        raise
     except Exception as exc:
         raise ValueError(f"Not a valid image: {exc}") from exc
 
@@ -99,3 +123,18 @@ def sanitize_image_bytes(raw_bytes: bytes, square_size: int, min_dimension: int 
     out = io.BytesIO()
     clean.save(out, format="PNG", optimize=True)
     return out.getvalue()
+
+
+def _reject_if_oversized(size) -> None:
+    """Raise ValueError when a decoded image would exceed
+    MAX_IMAGE_PIXELS. Called with the header-declared size, before any
+    pixel data is read."""
+    try:
+        width, height = size
+    except (TypeError, ValueError):
+        return
+    if width * height > MAX_IMAGE_PIXELS:
+        raise ValueError(
+            f"Image is {width}x{height} ({width * height:,} pixels), above the "
+            f"{MAX_IMAGE_PIXELS:,}-pixel limit"
+        )

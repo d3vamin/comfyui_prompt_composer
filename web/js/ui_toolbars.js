@@ -74,7 +74,7 @@ export function fingerprintSections(sections) {
 
 /**
  * Builds and manages the preset toolbar, implementing the exact
- * in-place-swap behavior from the spec rather than popup dialogs:
+ * in-place-swap behavior rather than popup dialogs:
  *
  *   SELECTION mode: dropdown + Save/Reload/Rename/Delete icon buttons. The
  *   dropdown contains saved presets and "New Preset".
@@ -98,7 +98,7 @@ export class PresetToolbar {
     * @param {() => void} opts.onNew - resets the composer to a genuinely empty section list (the locked "Prompt" row, no entries) and clears the preset name; called for the dropdown's "New Preset" and when a delete leaves no presets behind
      * @param {(confirmOpts) => Promise<boolean>} opts.confirmDialog - unused
      *   by this toolbar's own reload/delete flow (which uses its own
-     *   inline Yes/Cancel per spec) but kept for API compatibility with
+     *   inline Yes/Cancel) but kept for API compatibility with
      *   callers that already pass one.
      */
     constructor({ state, onLoad, onNew }) {
@@ -126,7 +126,7 @@ export class PresetToolbar {
         // unnamed). Non-null means the FIRST list response must select
         // (without loading) the matching disk preset instead of running
         // the "nothing selected yet -> auto-load preset #1" branch,
-        // which used to land after configure() and clobber the restored
+        // which would land after configure() and clobber the restored
         // sections with Preset_001.
         this._pendingRestore = null;
         // Whether the constructor's GET /presets has come back at least
@@ -137,7 +137,7 @@ export class PresetToolbar {
         // list response consuming it, so a response that beat
         // configure() (warm cache) can't auto-load in between.
         this._suppressAutoLoad = false;
-        // Layer B2: a restore whose composition matches NO disk preset
+        // A restore whose composition matches NO disk preset
         // is presented as an in-memory "virtual" preset -- dropdown
         // entry named after the composition, nothing written to disk,
         // and Save (coloured dirty) is what promotes it to a real file.
@@ -160,7 +160,7 @@ export class PresetToolbar {
      * @param {string|null} presetName - the name the composition was
      *   saved under (pc_preset_name), or null when it had none.
      * @param {object|null} [snapshot] - the workflow's
-     *   pc_workflow_snapshot, whose workflow_name names the Layer-B2
+     *   pc_workflow_snapshot, whose workflow_name names the
      *   virtual preset when the composition matches no disk preset.
      */
     noteWorkflowRestored(presetName, snapshot = null) {
@@ -195,7 +195,7 @@ export class PresetToolbar {
         // the workflow held at save time -- reloading the disk copy could
         // differ (preset edited after the workflow was saved) and must
         // not overwrite it. No match (renamed/deleted preset, or the
-        // composition was saved unnamed) hands the slot to the Layer-B2
+        // composition was saved unnamed) hands the slot to the
         // virtual preset, named after the composition: what was actually
         // named wins even if its file is gone (the user's own word for
         // this work), else the workflow it was saved inside, else -- an
@@ -286,7 +286,7 @@ export class PresetToolbar {
         select.innerHTML = "";
         const showVirtual = !!this._virtualPreset && !this._selectedFilename;
         if (showVirtual) {
-            // The Layer-B2 entry: a TEMP preset that exists only in this
+            // The virtual entry: a TEMP preset that exists only in this
             // node's memory. Nothing was written to disk -- the user
             // decides that (Save), which is exactly what the coloured
             // dirty Save button is signalling while it's selected.
@@ -381,7 +381,7 @@ export class PresetToolbar {
     }
 
     /**
-     * Round 15b: a library rename moves the prompt's ref, and the
+     * A library rename moves the prompt's ref, and the
      * server sweep rewrote this preset's FILE with the new one while
      * the host relinked our live sections to the SAME value -- the two
      * still agree, but the cached baseline string remembers the old
@@ -471,7 +471,7 @@ export class PresetToolbar {
      * "Above"/"below" mean adjacent in the dropdown, which is the
      * name-sorted order the server returns (see preset_store.list_presets),
      * so the selection moves exactly one step up the list the person is
-     * looking at. Once the deleted entry is gone, whatever used to sit
+     * looking at. Once the deleted entry is gone, whatever sat
      * after it occupies the deleted one's old index, which is why the
      * "next" preset is simply `_presets[index]` of the refreshed list.
      */
@@ -551,10 +551,10 @@ export class PresetToolbar {
      * genuinely empty section list (just the locked "Prompt" row, no
      * custom sections and no entries) and then open the name field.
      *
-     * It used to skip the reset entirely, so the "new" preset was saved
-     * from whatever composition happened to be on screen -- a silent
-     * copy of the preset you already had, which is the opposite of what
-     * picking "New Preset" reads as.
+     * Skipping the reset would save the "new" preset from whatever
+     * composition happened to be on screen -- a silent copy of the preset
+     * you already had, which is the opposite of what picking "New Preset"
+     * reads as.
      *
      * The outgoing composition is snapshotted first. Without that,
      * Cancel would have nothing to go back to and choosing "New Preset"
@@ -658,11 +658,26 @@ export class PresetToolbar {
             ? (defaultName || this._nextAvailablePresetName())
             : currentName;
 
+        // For "new"/"save-as": does the typed name already belong to a
+        // DIFFERENT preset on disk? If so, pressing Save would overwrite
+        // it (see save_preset's name-match rule on the server) rather
+        // than create a fresh file, so the button switches to an
+        // orange "Overwrite" warning instead of silently doing that
+        // under a "Save" label. Renaming has its own, separate
+        // collision message (see _renamePresetTo) and never uses this.
+        const collidesWithOtherPreset = (name) => {
+            if (isRename || !name) return false;
+            return this._presets.some(
+                (preset) => preset.name === name && preset.filename !== previousFilename
+            );
+        };
+
         nameInput.addEventListener("input", () => {
             // The mirror behind the comment at the top of this method.
             // Trim-only: whitespace typed so far is not a name yet.
             const nm = nameInput.value.trim();
             this.state().presetName = nm || null;
+            applySaveButtonState(nm);
         });
 
         const errorLabel = countPill({ inert: true, extra: "pc-entry-toolbar-count", text: "" });
@@ -719,7 +734,7 @@ export class PresetToolbar {
             text: "Cancel",
             onClick: () => {
                 // Restore the previously-selected preset with no changes,
-                // per spec: "If the user cancel and didn't save the
+                // The intended behavior: "If the user cancel and didn't save the
                 // preset, it will cancel saving the preset and back to
                 // the preset selection toolbar with the previous preset
                 // selected." Undoing "New Preset"'s reset is part of
@@ -737,6 +752,29 @@ export class PresetToolbar {
         });
 
         this.root.append(nameInput, saveBtn, cancelBtn, errorLabel);
+
+        // Reflect the pre-filled name immediately (e.g. "save-as"
+        // starts pre-filled with the CURRENT preset's own name, which
+        // is its own file, not a collision -- collidesWithOtherPreset
+        // already excludes previousFilename for exactly that case).
+        applySaveButtonState(nameInput.value.trim());
+
+        /**
+         * Paint the Save button as a plain "Save" or, when the typed
+         * name already belongs to a different preset on disk, as an
+         * orange "Overwrite" warning -- so committing a collision is a
+         * clearly-labelled choice instead of a silent side effect of
+         * pressing what still said "Save".
+         */
+        function applySaveButtonState(name) {
+            const overwriting = collidesWithOtherPreset(name);
+            saveBtn.textContent = overwriting ? "Overwrite" : (isRename ? "Done" : "Save");
+            saveBtn.classList.toggle("pc-warn", overwriting);
+            saveBtn.classList.toggle("pc-primary", !overwriting);
+            saveBtn.title = overwriting
+                ? `A preset named "${name}" already exists -- Save will overwrite it.`
+                : "";
+        }
     }
 
     /**
@@ -744,10 +782,9 @@ export class PresetToolbar {
      * lives at.
      *
      * Goes through the server's rename endpoint (write the new file, then
-     * remove the old one) rather than save-under-new-name, which is what
-     * used to happen here and left the original preset sitting next to
-     * its renamed copy -- the preset appeared to be duplicated rather
-     * than renamed.
+     * remove the old one) rather than save-under-new-name, which would leave
+     * the original preset sitting next to its renamed copy -- the preset
+     * would appear duplicated rather than renamed.
      *
      * @param {string} newName
      * @param {string} fromFilename - the preset being renamed
@@ -784,7 +821,7 @@ export class PresetToolbar {
         // means a NEW file alongside it (save-as) -- deliberately
         // different from the Rename icon, which moves the existing file
         // and never duplicates it. With a virtual workflow copy selected
-        // it is the PROMOTION gesture (design guide B2): same "new"
+        // it is the PROMOTION gesture: same "new"
         // mode, but pre-filled with the copy's name so one click saves
         // the composition under the name it arrived with.
         const promoteVirtual = !this._selectedFilename && this._virtualPreset;

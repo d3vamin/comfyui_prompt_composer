@@ -1,0 +1,2 @@
+#pc_meta {"categories": ["Lighting"]}
+warm sunlight illuminating

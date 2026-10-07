@@ -6,7 +6,27 @@
  * original single-file prompt_composer.js.
  */
 
+import { api as comfyApi } from "../../../scripts/api.js";
+
 export const API_BASE = "/prompt_composer";
+
+/**
+ * Absolute URL for one of this node's routes, built through ComfyUI's
+ * own API helper.
+ *
+ * A bare `fetch("/prompt_composer/...")` assumes ComfyUI is served from
+ * the ROOT of its origin. It is very often not: behind a reverse proxy
+ * at /comfy/, or started with a base-directory/base-path option, every
+ * one of these calls 404s. `api.apiURL()` prefixes whatever base the
+ * running frontend was configured with, so the same code works in both
+ * layouts -- and it is also the URL shape `<img src>` needs.
+ */
+export function apiUrl(path) {
+    if (comfyApi && typeof comfyApi.apiURL === "function") {
+        return comfyApi.apiURL(API_BASE + path);
+    }
+    return API_BASE + path;
+}
 
 export function uuid() {
     return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
@@ -164,7 +184,13 @@ export function el(tag, className, attrs) {
 }
 
 export async function api(path, opts) {
-    const res = await fetch(API_BASE + path, opts);
+    // api.fetchApi() -- not bare fetch() -- so the request carries the
+    // frontend's configured base path AND whatever auth/session headers
+    // ComfyUI attaches (multi-user and hosted deployments need them;
+    // a plain fetch silently skips both).
+    const res = (comfyApi && typeof comfyApi.fetchApi === "function")
+        ? await comfyApi.fetchApi(API_BASE + path, opts)
+        : await fetch(API_BASE + path, opts);
     if (!res.ok) {
         let msg = res.statusText;
         try {

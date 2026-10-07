@@ -14,8 +14,7 @@ Responsibilities:
 - Resolve each Entry's `prompt_ref` pointer against the on-disk library
   via `library_store.resolve()` immediately before composing, so the
   library is always the single, current source of truth for prompt
-  content (see comfyUI_Prompt_composer.md, "Resolution" section, for
-  why this happens in Python rather than being frozen into
+  content (this happens in Python rather than being frozen into
   composer_state by the frontend).
 
 Data model (as JSON, produced by the frontend)
@@ -81,10 +80,13 @@ wherever it sits in the section order.
 """
 
 import json
+import logging
 import random
 import threading
 import time
 from collections import OrderedDict
+
+log = logging.getLogger("prompt_composer")
 
 try:
     from .server import library_store
@@ -95,12 +97,12 @@ except ImportError:  # pragma: no cover - allows standalone import during tests
 
 
 # ---------------------------------------------------------------------------
-# Layer C3: last-executed-output stash.
+# Last-executed-output stash (named "C3" in the route and log messages).
 #
 # compose() runs at EXECUTION time with the server-injected UNIQUE_ID
 # hidden input, so it is the only place that knows the string a node
 # ACTUALLY emitted (as opposed to "what the current preview would
-# compose", which C1/C2 mirror). We keep a small bounded in-memory map
+# compose"). We keep a small bounded in-memory map
 # keyed by NODE ID, holding the latest executed output for each. The
 # frontend's execution_success listener fetches from it (GET
 # /prompt_composer/last_output/{prompt_id}/{node_id}) and folds the
@@ -130,12 +132,30 @@ _LAST_OUTPUTS_MAX = 512
 _LAST_OUTPUTS_LOCK = threading.Lock()
 
 
-def record_executed_output(prompt_id, node_id, prompt_text, seed):
-    """Stash one executed output under its node id (latest wins). Never
-    raises: capture is provenance, and a provenance failure must not sink
-    the run that produced it."""
+def _stash_key(node_id, client_key) -> str:
+    """The stash address for one node.
+
+    Node id ALONE is not unique across browser tabs: ids restart at 1 in
+    every workflow, so two tabs running two different graphs both write
+    to "1" and each can adopt the other's output. `client_key` is a
+    per-page-load random string the frontend mirrors into a hidden
+    widget, which makes the pair unique per tab. It is optional, so a
+    stale frontend (or any caller that doesn't send one) keeps the old
+    node-id-only addressing and behaves exactly as before.
+    """
+    node = str(node_id or "")
+    if not node:
+        return ""
+    client = str(client_key or "").strip()
+    return f"{client}|{node}" if client else node
+
+
+def record_executed_output(prompt_id, node_id, prompt_text, seed, client_key=None):
+    """Stash one executed output under its (client_key, node id) address
+    (latest wins). Never raises: capture is provenance, and a provenance
+    failure must not sink the run that produced it."""
     try:
-        key = str(node_id or "")
+        key = _stash_key(node_id, client_key)
         if not key:
             return  # no UNIQUE_ID injected -> nothing addressable to store
         with _LAST_OUTPUTS_LOCK:
@@ -144,6 +164,8 @@ def record_executed_output(prompt_id, node_id, prompt_text, seed):
                 "seed": seed,
                 "at": time.time(),
                 "prompt_id": str(prompt_id or ""),
+                "node_id": str(node_id or ""),
+                "client_key": str(client_key or ""),
             }
             _LAST_OUTPUTS.move_to_end(key)
             while len(_LAST_OUTPUTS) > _LAST_OUTPUTS_MAX:
@@ -152,15 +174,21 @@ def record_executed_output(prompt_id, node_id, prompt_text, seed):
         pass
 
 
-def get_executed_output(prompt_id, node_id):
+def get_executed_output(prompt_id, node_id, client_key=None):
     """The most recent stashed output for one node, or None. prompt_id is
     accepted for signature/route stability but is NOT part of the address
-    (see the header comment -- some builds inject an empty PROMPT_ID)."""
-    key = str(node_id or "")
-    if not key:
-        return None
+    (see the header comment -- some builds inject an empty PROMPT_ID).
+
+    Falls back to the node-id-only address when the (client_key, node)
+    pair has nothing, so a record written by an older build -- or by a
+    run whose frontend sent no key -- is still found.
+    """
     with _LAST_OUTPUTS_LOCK:
-        return _LAST_OUTPUTS.get(key)
+        key = _stash_key(node_id, client_key)
+        if key and key in _LAST_OUTPUTS:
+            return _LAST_OUTPUTS[key]
+        bare = str(node_id or "")
+        return _LAST_OUTPUTS.get(bare) if bare else None
 
 
 ENTRY_SEPARATOR_SUFFIX = {
@@ -228,7 +256,15 @@ def _resolve_section_entries(section, rng):
     NOTE: unchanged. Operates purely on the already-resolved
     `text` field; has no knowledge of prompt_ref.
     """
-    prompts = section.get("prompts", [])
+    # One key, "entries" -- the same name the frontend, the preset store
+    # and this module's own data-model docstring use. The older "prompts"
+    # key is still accepted as a fallback for callers passing the old
+    # shape, but it must never be written alongside "entries": that would
+    # leave two parallel entry lists in one dict and silently compose an
+    # empty block for any section handed in with only "entries".
+    prompts = section.get("entries")
+    if not prompts:
+        prompts = section.get("prompts") or []
 
     if section.get("randomize"):
         pool = [p for p in prompts if p.get("allow_random") and p.get("visible")]
@@ -249,7 +285,7 @@ END_SEPARATOR_MAP = {
 }
 
 
-def compose_prompt(sections, seed=0, user_prompt=""):
+def compose_prompt(sections, seed=0, user_prompt="", chosen_out=None):
     """Build the final assembled prompt string from an ordered list of
     section dicts, applying queue-time randomization deterministically
     based on `seed`.
@@ -278,6 +314,21 @@ def compose_prompt(sections, seed=0, user_prompt=""):
       the very end of the section's block, and OVERRIDES whatever the
       last visible entry's own `entry_separator` would have produced.
     - `show_label`: if true, the block is prefixed with "<Section Name>: ".
+
+    `chosen_out` (optional): a dict this function POPULATES (side
+    channel, same pattern as _resolve_entries_text's resolved_out) with
+    {section_id: [entry_id, ...]} for every non-locked-prompt section
+    that contributed a block -- exactly the entries _resolve_section_
+    entries decided to include, which for a randomized section means
+    exactly the one entry rng.choice() picked (plus any always-included
+    ones). This is the ONLY place that pick is known; compose_prompt
+    joins it straight into an untyped text block otherwise, and there
+    would be no way to answer "which entry did the server actually use"
+    afterward. The /compose route surfaces this as "chosen" in its
+    response so the JS preview can highlight/color the SAME entry the
+    string it is showing was actually built from, instead of
+    recomputing its own (different-PRNG) guess independently -- see
+    ui_preview.js's _hasUnconfirmedRandomPool / getSectionBlocks.
     """
     blocks = []
 
@@ -301,6 +352,11 @@ def compose_prompt(sections, seed=0, user_prompt=""):
         block = _join_entries(chosen_entries)
         if not block:
             continue
+
+        if chosen_out is not None:
+            section_id = section.get("id")
+            if section_id is not None:
+                chosen_out[section_id] = [e.get("id") for e in chosen_entries if e.get("id") is not None]
 
         if section.get("show_label"):
             label = (section.get("name") or "").strip()
@@ -362,8 +418,7 @@ def _resolve_entries_text(sections, fallback_contents=None, resolved_out=None):
         - "visible": copied straight through from the entry's own
           on/off output-inclusion (Show/Hide) toggle (a real,
           independent property an Entry owns, distinct from the
-          transient "selected" checkbox used for copy/cut/delete -- see
-          comfyUI_Prompt_composer.md).
+          transient "selected" checkbox used for copy/cut/delete).
           Defaults to True only if the field is entirely absent (e.g.
           an older/partial composer_state payload), so existing
           behavior degrades gracefully rather than silently dropping
@@ -420,7 +475,7 @@ def _resolve_entries_text(sections, fallback_contents=None, resolved_out=None):
                 "visible": bool(entry.get("visible", True)),
             })
 
-        new_section = {**section, "prompts": new_entries}
+        new_section = {**section, "entries": new_entries}
         new_sections.append(new_section)
 
     return new_sections
@@ -448,7 +503,47 @@ class PromptComposerNode:
                     "default": 0,
                     "min": 0,
                     "max": 0xffffffffffffffff,
-                    "control_after_generate": True,
+                    # A STRING here (not True) sets which control mode
+                    # the auto-added combo box next to this widget
+                    # STARTS on -- passing True leaves that choice to
+                    # the frontend, whose own default is "randomize"
+                    # (see web/scripts/widgets.js: createIntWidget/
+                    # seedWidget default to "randomize" whenever this
+                    # value isn't already a string). "randomize" means
+                    # the widget's OWN VALUE is rewritten to a fresh
+                    # random number after every single queue -- and
+                    # that new value is a literal input ComfyUI folds
+                    # into this node's cache signature on the NEXT
+                    # queue attempt regardless of anything else in the
+                    # node changing, since compose_prompt() only reads
+                    # seed at all for sections with randomize=true, so
+                    # for the (most common) case of zero randomized
+                    # sections a changing seed alters nothing about the
+                    # composed output while still forcing a full
+                    # re-run. That reads externally as "I only touched
+                    # something unrelated (a thumbnail, a rename, a
+                    # section's structure) and it still reran" even
+                    # after IS_CHANGED() and every literal-input widget
+                    # this node owns are made fully output-stable (see
+                    # IS_CHANGED()'s own docstring, and
+                    # serializeForQueue()/usedPromptRefsForQueue() in
+                    # web/js/composer_state.js): the PREVIOUS run's
+                    # auto-randomized seed is a real, literal input
+                    # change sitting one full queue ahead of whatever
+                    # the person just edited, and no amount of making
+                    # composer_state/composer_contents/IS_CHANGED
+                    # stable can undo a DIFFERENT input (seed) actually
+                    # having changed. "fixed" makes this widget behave
+                    # like every other STRING/BOOL input on this node --
+                    # it only changes when the person deliberately
+                    # changes it (or flips this combo back to
+                    # randomize/increment/decrement themselves, which
+                    # remains fully available in the UI) -- which is
+                    # also the only sane default for a widget that,
+                    # unlike a sampler's seed, does nothing at all
+                    # unless at least one section has randomize turned
+                    # on.
+                    "control_after_generate": "fixed",
                 }),
             },
             "hidden": {
@@ -461,16 +556,23 @@ class PromptComposerNode:
                 # fallback: used at compose time ONLY for refs the live
                 # library cannot resolve, so a workflow opened where its
                 # prompts are missing still queues the original text.
-                # "{}" (the default) keeps every pre-B4 workflow
-                # behaving exactly as before.
+                # "{}" (the default) means "no embedded copies":
+                # workflows without any behave exactly as before.
                 "composer_contents": ("STRING", {"default": "{}"}),
-                # Layer C3: server-injected execution identity (never
+                # Executed-output capture: server-injected execution identity (never
                 # widgets, never in widgets_values -- old workflows
                 # configure untouched). compose() stashes the emitted
                 # string under (prompt_id, unique_id) so the frontend
                 # can show, and SAVE, what was really generated.
                 "unique_id": "UNIQUE_ID",
                 "prompt_id": "PROMPT_ID",
+                # Executed-output disambiguator: a random string the frontend
+                # regenerates once per PAGE LOAD and mirrors into a
+                # hidden widget. Node ids restart at 1 in every
+                # workflow, so without it two browser tabs write to --
+                # and adopt from -- the same stash address. Optional:
+                # "" keeps the old node-id-only behavior.
+                "client_key": ("STRING", {"default": ""}),
             },
         }
 
@@ -480,16 +582,111 @@ class PromptComposerNode:
     CATEGORY = "utils/prompt"
     DESCRIPTION = "Compose a prompt from reusable, library-backed prompt entries with queue-time randomization."
 
+    @classmethod
+    def IS_CHANGED(cls, seed=0, user_prompt="", composer_state="[]",
+                   composer_contents="{}", **kwargs):
+        """Tell ComfyUI when this node's OUTPUT can no longer be reused.
+
+        ComfyUI caches a node's result against a fingerprint of its
+        inputs, and naively hashing composer_state/composer_contents
+        verbatim was wrong in BOTH directions at once:
+
+        - too LOOSE for the library (the original bug this whole
+          IS_CHANGED override exists to fix): a hidden STRING widget
+          holding only prompt_refs can't see a live edit to a prompt's
+          text made from the library UI, so without some library-aware
+          check, editing a prompt file left the node silently serving
+          its stale cached string.
+        - too STRICT for composer_state/composer_contents themselves:
+          those two JSON blobs carry the entire INTERNAL editing model
+          -- section structure, ordering, an entry's on/off toggles,
+          every section's randomize/show_label/end_separator settings,
+          every entry's own id, and the embedded workflow-snapshot
+          fallback copies -- not just the handful of fields that
+          actually reach compose_prompt()'s returned string. Hashing
+          that whole blob verbatim meant adding a brand new EMPTY
+          section, renaming an entry that isn't even visible, dragging
+          sections into a different order that happens to produce the
+          same joined text, or any other edit to the composer's
+          internal bookkeeping moved the hash and forced a real
+          re-run -- and everything downstream of this node along with
+          it -- even though not one character of the actual composed
+          prompt had changed.
+
+        The fix for both is the same idea taken to its logical end:
+        instead of hashing the INPUTS and hoping that tracks the
+        output, actually COMPUTE the output. This method runs the
+        exact same pipeline compose() does -- parse composer_state,
+        resolve every prompt_ref against the live library with
+        composer_contents' embedded copies as the fallback (identical
+        precedence, identical library_store.resolve_many() call), feed
+        the result through the identical compose_prompt(seed=seed,
+        user_prompt=user_prompt) -- and hashes the resulting STRING.
+        Nothing else about composer_state or composer_contents is
+        hashed at all. Two calls that would make compose() return the
+        same string now always produce the same IS_CHANGED() value,
+        and two calls that would make it return different strings
+        always produce different values -- by construction, not by
+        trying to enumerate every field that matters and keep that
+        list in sync with compose_prompt() by hand.
+
+        This does mean IS_CHANGED() does real work now (one library
+        resolve_many() batch call plus one compose_prompt() run) rather
+        than a handful of string concatenations, but resolve_many() is
+        the same stat-cache-backed batch lookup compose() itself was
+        always going to do a moment later if the queue actually
+        proceeds, and compose_prompt() over even a large composer is
+        pure in-memory list/string work -- ComfyUI already calls
+        IS_CHANGED() once per queue attempt for this node regardless,
+        so this trades "hash some strings" for "do the same resolve
+        every real run needs anyway" rather than adding a new,
+        separate cost on top of it. seed and user_prompt are passed
+        into the same compose_prompt() call rather than folded into the
+        hash separately, since they're exactly the two extra inputs
+        that call already accounts for.
+
+        Randomized sections stay reproducible here: compose_prompt()
+        seeds its per-section RNG from `f"{seed}:{section_id}"`, so
+        calling it again with the same seed and the same composer_state
+        picks the exact same entries a real run would, rather than
+        re-rolling and spuriously appearing "changed" on every check.
+        """
+        try:
+            sections = json.loads(composer_state) if composer_state else []
+        except (json.JSONDecodeError, TypeError):
+            sections = []
+        try:
+            fallback_contents = json.loads(composer_contents) if composer_contents else {}
+            if not isinstance(fallback_contents, dict):
+                fallback_contents = {}
+        except (json.JSONDecodeError, TypeError):
+            fallback_contents = {}
+
+        if sections and all(isinstance(s, dict) and "order" in s for s in sections):
+            sections = sorted(sections, key=lambda s: s.get("order", 0))
+
+        try:
+            resolved_sections = _resolve_entries_text(sections, fallback_contents=fallback_contents)
+            result = compose_prompt(resolved_sections, seed=seed, user_prompt=user_prompt)
+        except Exception:
+            # Malformed composer_state/composer_contents, or a library
+            # read error: never block a queue attempt over this check
+            # failing -- fall back to something that at least still
+            # changes whenever the raw inputs do, same as before this
+            # method existed.
+            return f"{seed}|{user_prompt}|{composer_state}|{composer_contents}|{time.time()}"
+        return result
+
     def compose(self, seed=0, user_prompt="", composer_state="[]", composer_contents="{}",
-                unique_id=None, prompt_id=None):
+                unique_id=None, prompt_id=None, client_key=None):
         try:
             sections = json.loads(composer_state) if composer_state else []
         except (json.JSONDecodeError, TypeError):
             sections = []
 
-        # The workflow's embedded prompt copies (Layer B4). Any malformed
-        # or non-object payload degrades to "no fallback" -- the pre-B4
-        # behavior -- rather than failing the queue.
+        # The workflow's embedded prompt copies. Any malformed
+        # or non-object payload degrades to "no fallback" rather than
+        # failing the queue.
         try:
             fallback_contents = json.loads(composer_contents) if composer_contents else {}
             if not isinstance(fallback_contents, dict):
@@ -505,7 +702,7 @@ class PromptComposerNode:
 
         resolved_sections = _resolve_entries_text(sections, fallback_contents=fallback_contents)
         result = compose_prompt(resolved_sections, seed=seed, user_prompt=user_prompt)
-        # C3: only a REAL execution carries UNIQUE_ID (injected by the
+        # Only a REAL execution carries UNIQUE_ID (injected by the
         # server); the /compose preview route calls this function without
         # it, so preview refreshes never masquerade as executed output.
         # PROMPT_ID is OPTIONAL here -- captured for provenance only. The
@@ -515,19 +712,16 @@ class PromptComposerNode:
         # means a stale copy of this class ran (no identity injection), so
         # we print a terminal warning rather than silently storing nothing.
         if unique_id is None:
-            print("PromptComposer C3: compose ran WITHOUT node identity injection "
-                  "(unique_id=None) -- the executing server holds a stale copy of "
-                  "this node class (wrong custom_nodes folder or no restart).",
-                  flush=True)
+            log.warning(
+                "C3: compose ran WITHOUT node identity injection (unique_id=None) "
+                "-- the executing server holds a stale copy of this node class "
+                "(wrong custom_nodes folder or no restart)."
+            )
         else:
-            record_executed_output(prompt_id, unique_id, result, seed)
+            record_executed_output(prompt_id, unique_id, result, seed,
+                                   client_key=client_key)
         return (result,)
 
 
-NODE_CLASS_MAPPINGS = {
-    "PromptComposer": PromptComposerNode,
-}
-
-NODE_DISPLAY_NAME_MAPPINGS = {
-    "PromptComposer": "Prompt Composer",
-}
+# NOTE: the node mappings ComfyUI reads live only in the package's
+# __init__.py, so there is a single source of truth for them.

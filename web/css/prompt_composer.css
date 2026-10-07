@@ -6,13 +6,13 @@
  * grid / edit panel on the right, assembled preview along the bottom.
  */
 :root {
-    /* ==== Prompt Composer color system (round 44, syntax fixed 45) ====
+    /* ==== Prompt Composer color system ====
        Chromatic literals live HERE only, as role bases; every other
        rule consumes a base or a DERIVED recipe -- color-mix() for
        blends toward the mix anchors and for transparent washes.
        Edit a base and its whole family follows: bg, border, hover,
        wash, text. hsl(from ...) relative-color syntax is BANNED:
-       the ComfyUI Chromium does not resolve it (round 45 bug).
+       the ComfyUI Chromium does not resolve it.
        Exception by design: section/tag colors persist to the backend
        as raw hex (preset_store truncates to 16 chars), so naming.js
        keeps that palette and cards re-scope --accent inline; the four
@@ -32,7 +32,7 @@
     /* mix anchors: every lighter/darker recipe blends the base with
        these -- shift them (e.g. a warm highlight, a blue shadow) and
        all lightness rungs follow. hsl(from ...) is BANNED: the
-       ComfyUI Chromium does not resolve it (round 45). */
+       ComfyUI Chromium does not resolve it. */
     --pc-highlight: #ffffff;
     --pc-shadow: #000000;
 
@@ -61,10 +61,11 @@
     /* danger variations */
     --pc-danger-deep: color-mix(in srgb, var(--pc-danger) 52%, var(--pc-shadow));
     --pc-danger-line: color-mix(in srgb, var(--pc-danger) 70%, var(--pc-shadow));
-    --pc-danger-pale: color-mix(in srgb, var(--pc-danger) 52%, var(--pc-highlight));
+    --pc-danger-pale: color-mix(in srgb, var(--pc-danger) 34%, var(--pc-highlight));
 
     /* neutrals */
     --pc-text: #d7d7d7;
+    --pc-text-light: #e7e7e7;
     --pc-text-dim: #999999;
     --pc-text-input: #161616;
     --pc-panel-light: color-mix(in srgb, var(--pc-panel) 98%, var(--pc-highlight));
@@ -106,7 +107,7 @@
 
 .pc-preset-select {
     flex: 1 1 auto;
-    background: var(--pc-btn-border);
+    background: var(--pc-panel);
     color: var(--pc-text);
     border: 1px solid var(--pc-btn-border);
     border-radius: 4px;
@@ -154,6 +155,17 @@
     color: var(--pc-danger-pale);
 }
 
+.pc-btn.pc-warn {
+    background: var(--pc-warn-deep);
+    border-color: var(--pc-warn);
+    color: var(--pc-text);
+}
+
+.pc-btn.pc-warn:hover {
+    background: var(--pc-warn-deep);
+    filter: brightness(1.08);
+}
+
 .pc-btn.pc-danger:hover {
     background: var(--pc-danger-deep);
 }
@@ -192,7 +204,7 @@
     line-height: 1;
 }
 
-/* Round 59: the section's end separator is SET (not "none") -- the
+/* The section's end separator is SET (not "none") -- the
  * button that manages it lights gold, exactly like the entry-end
  * separator button on a card. Cycled back to none, it dims with the
  * rest of the row's chrome. */
@@ -217,6 +229,14 @@
     color: var(--pc-safe-pale);
 }
 
+.pc-multiselect > .pc-btn.pc-add-entry-btn {
+    /* Sits to the right of the category field itself (see the
+       edit-panel layout): a fixed-size icon
+       button that never shrinks to make room for the summary text,
+       nor grows past its own content. */
+    flex: 0 0 auto;
+}
+
 .pc-btn.pc-add-entry-btn:hover {
     background: var(--pc-safe);
     border-color: var(--pc-safe-light);
@@ -227,20 +247,20 @@
     cursor: default;
 }
 
-/* ---------- Unified control states (round 39; paint-only round 40) ----------
+/* ---------- Unified control states ----------
    Everything built by ui_chrome.js (buttons, toggles, chips, swatches,
    counters, search clears) carries .pc-pressable: ONE affordance
    language for normal / hover / pressed / focus. Families keep their
-   own look; the lift is universal. Round 40: the lift is a background
+   own look; the lift is universal. The lift is a background
    WASH (inset box-shadow flood), never filter/transform -- those
    promote composited layers, and Chromium answers by dropping LCD
    subpixel text antialiasing across the overlap: hovering a chip
    visibly "changed the brightness" of unrelated card text, and a
    toggle press flickered the whole grid. Paint-only is flicker-proof.
    999px spread = the wash covers any sane control size.
-   Round 42 adds the physical press STEP (1px down via relative
+   Pressing also takes a physical STEP (1px down via relative
    `top` -- layout, never transform, so no layer and no ghost).
-   Round 43: the opt-out is the FACTORY's noStep option, not a
+   The opt-out is the FACTORY's noStep option, not a
    hand-written :not() list -- the card's bottom-anchored
    random/separator overlays got clobbered by `top` and tele-
    ported to the card's top edge while pressed (absolute + top
@@ -306,7 +326,7 @@
     gap: 6px;
 }
 
-/* ---------- Counters (round 39 unification) ----------
+/* ---------- Counters ----------
    .pc-count-pill is the shared chrome of every "N of M" chip: the bulk
    bar's "N selected" toggle and the section row's visible/total pill.
    One geometry, one hover, one RESERVED 2px ring (transparent border
@@ -426,7 +446,7 @@
     flex-direction: column;
     /* The panel itself no longer scrolls as a whole -- the section
        toolbar (a direct, pinned child; see .pc-left-panel > .pc-section-toolbar
-       below) needs to stay visible at the top per spec ("Section
+       below) needs to stay visible at the top ("Section
        toolbar at top") even when the section list below it overflows.
        Only .pc-section-list scrolls (see its own overflow-y rule). */
     overflow: hidden;
@@ -508,7 +528,7 @@ body.pc-resizing {
 }
 
 .pc-library-row {
-    /* Library is pinned and can never be reordered (per spec), so it
+    /* Library is pinned and can never be reordered, so it
        gets a normal pointer cursor instead of the draggable "grab"
        cursor every real section row has, and a small bottom margin to
        visually separate it from the reorderable list beneath it. */
@@ -522,7 +542,7 @@ body.pc-resizing {
 }
 
 .pc-section-row:hover {
-    /* Round 40: wash instead of filter -- same lift, no compositing. */
+    /* Wash instead of filter -- same lift, no compositing. */
     box-shadow: inset 0 0 0 999px rgba(255, 255, 255, 0.06);
 }
 
@@ -691,14 +711,14 @@ body.pc-resizing {
 }
 
 /* The section row's visible/total pill: chrome + clickability + ring
-   all ride the shared .pc-count-pill base (round 39); this variant is
+   all ride the shared .pc-count-pill base; this variant is
    only the smaller type and the value child's nowrap. */
 .pc-section-count {
     font-size: 10px;
     flex: 0 0 auto;
 }
 
-/* Round 21b: the affordances belong to the CLICKABLE state only. An
+/* The affordances belong to the CLICKABLE state only. An
    empty section's pill is inert -- and must keep its orange background
    untouched by hover (the whole point of the orange is to read as a
    gap; a hover wash would erase it). */
@@ -711,7 +731,7 @@ body.pc-resizing {
 }
 
 .pc-section-count.pc-section-count-empty:hover {
-    box-shadow: none; /* round 40: also pin the shared pressable wash off */
+    box-shadow: none; /* Also pin the shared pressable wash off */
     background: var(--pc-warn-deep);
     border-color: transparent;
 }
@@ -754,7 +774,7 @@ body.pc-resizing {
 
 .pc-section-alert.pc-on {
     filter: none;
-    box-shadow: none; /* round 40: armed chips carry state, not a hover lift */
+    box-shadow: none; /* Armed chips carry state, not a hover lift */
     outline: 2px solid var(--pc-safe);
     border-radius: 4px;
 }
@@ -771,7 +791,7 @@ body.pc-resizing {
     margin: 0 0 0 -2px;
     background: var(--pc-warn-deep);
     border-color: var(--pc-warn);
-    color: #fff;
+    color: var(--pc-text);
 }
 
 .pc-entry-selection-reset[hidden] {
@@ -781,7 +801,7 @@ body.pc-resizing {
 .pc-btn.pc-entry-selection-reset:hover {
     background: var(--pc-warn);
     border-color: var(--pc-warn-pale);
-    color: #fff;
+    color: var(--pc-text);
 }
 
 .pc-section-row .pc-btn.pc-end-separator-btn {
@@ -924,9 +944,9 @@ body.pc-resizing {
  * riding over the 44px thumbnail's edge, stacked above the image and
  * under the options overlay and star. The row's left edge keeps
  * carrying the VISIBLE accent -- the two states stay independently
- * readable. (r50: the 2px border ring was retired; the glow IS the
- * selection look. The stripe widening deliberately shifts row content
- * on visibility toggles -- user's call, no reservation.) */
+ * readable. The glow IS the selection look. The stripe widening
+ * deliberately shifts row content on visibility toggles, with no space
+ * reserved for it. */
 .pc-entry-row:not(.pc-library-row-item).pc-selected .pc-entry-row-thumb::after {
     content: "";
     position: absolute;
@@ -959,8 +979,8 @@ body.pc-resizing {
 .pc-entry-row-options-overlay {
     position: absolute;
     z-index: 2; /* above the selection glow overlay (z:1) */
-    top: 2px;
-    left: 2px;
+    top: 0px;
+    left: 0px;
     opacity: 0;
     transition: opacity 0.12s ease;
 }
@@ -1054,7 +1074,7 @@ body.pc-resizing {
 
 /* SELECTION (the top-right checkbox -- copy/cut/delete target) is an
  * inset --pc-info GLOW over the thumbnail's inner edge, grid and list
- * alike (r50: the 2px border ring was retired in favor of it). The
+ * alike. The
  * glow is a dedicated ::after overlay, NOT a box-shadow on the wrap
  * itself -- an inset shadow on the wrap paints UNDER the image child
  * and would be invisible over real artwork. As a generated last child
@@ -1184,7 +1204,7 @@ body.pc-resizing {
 
 .pc-entry-image-delete:hover {
     background: var(--pc-danger-deep);
-    color: #fff;
+    color: var(--pc-text);
 }
 
 
@@ -1202,7 +1222,7 @@ body.pc-resizing {
     justify-content: flex-end;
     align-items: stretch;
     gap: 4px;
-    padding: 16px 6px 6px 6px;
+    padding: 20px 6px 6px 6px;
     background: color-mix(
         in srgb,
         color-mix(in srgb, var(--accent, var(--pc-shadow)) 50%, #000000 50%) 70%,
@@ -1221,7 +1241,7 @@ body.pc-resizing {
 .pc-entry-overlay-text {
     font-size: 10px;
     line-height: 1.3;
-    color: #fff;
+    color: var(--pc-text-light);
     max-height: 100%;
     flex: 1 1 auto;
     overflow: hidden;
@@ -1254,6 +1274,7 @@ body.pc-resizing {
 .pc-entry-label-name {
     /* The ellipsis lives on the name itself now -- a long name can no
        longer shove the badge out of the card. */
+    max-width: 88px;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1343,17 +1364,15 @@ body.pc-resizing {
 
 .pc-entry-options-btn {
     position: absolute;
-    top: 0px;
-    left: 0px;
     background: rgba(0, 0, 0, 0.55);
-    color: #fff;
+    color: var(--pc-text);
     border: none;
     border-radius: 3px;
-    width: 16px;
-    height: 16px;
+    width: 20px;
+    height: 20px;
     line-height: 16px;
     text-align: center;
-    padding: 0;
+    padding: 2px 0 0 0;
     cursor: pointer;
     opacity: 0;
     transition: opacity 0.12s ease;
@@ -1400,7 +1419,7 @@ body.pc-resizing {
 .pc-entry-row .pc-entry-select-checkbox {
     /* Inside .pc-entry-row-actions (a normal flex row), not absolutely
        positioned like the grid card's version -- it just sits at the
-       end of the row's action icons, on the right side per spec. */
+       end of the row's action icons, on the right side. */
     position: static;
     width: 14px;
     height: 14px;
@@ -1558,7 +1577,7 @@ body.pc-resizing {
     font-weight: 700;
 }
 
-/* Round 57: the clipped LAST-shown badge. The row shows as many whole
+/* The clipped LAST-shown badge. The row shows as many whole
  * pills as fit; when something must go, the badge at the end of the
  * visible prefix keeps its seat and the TEXT gives: it may shrink below
  * its content (min-width:0 is the incantation that lets a flex item go
@@ -1655,7 +1674,7 @@ body.pc-resizing {
     display: flex;
     align-items: center;
     font-size: 11px;
-    color: var(--pc-text-dim);
+    color: var(--pc-text);
 }
 
 .pc-text-input,
@@ -1668,6 +1687,57 @@ body.pc-resizing {
     font-family: inherit;
     font-size: 12px;
     flex: 1 1 auto;
+}
+
+/* ---------- Name autocomplete: a small floating list under the Name
+   field in the edit-prompt panel, showing up to 3 existing library
+   prompt names that alphabetically match what's been typed so far.
+   Purely a "here's what already exists" aid -- picking one just fills
+   the field, it never submits anything by itself. Wraps the name
+   .pc-field-row (which is given position: relative below) so it can
+   sit absolutely positioned directly under the input without
+   disturbing that row's own layout. */
+.pc-name-autocomplete-wrap {
+    position: relative;
+    flex: 1 1 auto;
+    display: flex;
+}
+
+.pc-name-autocomplete-list {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    z-index: 20;
+    margin-top: 2px;
+    background: var(--pc-panel-deep);
+    border: 1px solid var(--pc-btn);
+    border-radius: 4px;
+    overflow: hidden;
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.35);
+}
+
+.pc-name-autocomplete-item {
+    padding: 5px 8px;
+    font-size: 12px;
+    color: var(--pc-text);
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.pc-name-autocomplete-item:hover,
+.pc-name-autocomplete-item.pc-name-autocomplete-active {
+    background: var(--pc-btn-hover, var(--pc-btn));
+}
+
+/* Same slot/sizing as .pc-locked-note (the blocking "already exists"
+   message) -- this one just uses the pale warn tone instead of the
+   blocking red, since it's purely informational and never disables
+   Save/Done. */
+.pc-name-soft-warning {
+    color: var(--pc-warn-pale);
 }
 
 /* ---------- Preset name input: replaces .pc-preset-select in the top
@@ -1720,7 +1790,7 @@ body.pc-resizing {
     color: var(--pc-text);
 }
 
-/* Round 34: the search upgrade's three small surfaces.
+/* The search upgrade's three small surfaces.
  * Hit marks are a TINT only -- bolding the marks would change the
  * text width mid-list and make rows jitter as the query updates.
  * (mark is a bare tag; its class keeps the pc- token discipline.) */
@@ -1802,6 +1872,16 @@ mark.pc-search-hit {
 .pc-multiselect {
     position: relative;
     width: 100%;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+
+.pc-multiselect-field-wrap {
+    position: relative;
+    flex: 1 1 auto;
+    min-width: 0;
 }
 
 .pc-multiselect-summary {
@@ -1897,19 +1977,17 @@ mark.pc-search-hit {
     opacity: 1;
 }
 
-.pc-multiselect-add-category {
-    width: 100%;
-    justify-content: flex-start;
-    border: 0;
-    background: transparent;
-    color: var(--pc-safe-light);
-    cursor: pointer;
-    font: inherit;
-    text-align: left;
-}
-
-.pc-multiselect-add-category svg {
-    flex: 0 0 auto;
+/* Folder-category rows: visually grouped at the top of the dropdown
+   (see buildMultiSelectDropdown's render order) with a divider under
+   the LAST one so "where does this live" reads as a distinct block
+   from "None" and the ordinary tags below it. Selector targets the
+   folder-option row that is immediately followed by a non-folder
+   sibling -- i.e. the last one in the contiguous folder group --
+   rather than a fixed nth-child, since the folder count varies. */
+.pc-multiselect-folder-option:has(+ :not(.pc-multiselect-folder-option)) {
+    margin-bottom: 4px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--pc-btn-border);
 }
 
 .pc-multiselect-category-toolbar {
@@ -1917,6 +1995,7 @@ mark.pc-search-hit {
     align-items: center;
     gap: 4px;
     margin-top: 4px;
+    flex-basis: 100%;
 }
 
 .pc-multiselect-category-toolbar .pc-multiselect-category-input {
@@ -1926,24 +2005,47 @@ mark.pc-search-hit {
 
 .pc-multiselect-category-toolbar .pc-category-add-button {
     background: var(--pc-safe-deep);
-    border-color: var(--pc-safe-light);
-    color: #fff;
+    border-color: var(--pc-safe-line);
+    color: var(--pc-safe-pale);
 }
 
 .pc-multiselect-category-toolbar .pc-category-add-button:hover {
-    background: var(--pc-safe-light);
-    border-color: var(--pc-safe-light);
+    background: var(--pc-safe-deep);
+    border-color: var(--pc-safe-line);
 }
 
 .pc-multiselect-category-toolbar .pc-category-cancel-button {
-    background: var(--pc-danger);
+    background: var(--pc-danger-deep);
     border-color: var(--pc-danger-line);
-    color: #fff;
+    color: var(--pc-danger-pale);
 }
 
 .pc-multiselect-category-toolbar .pc-category-cancel-button:hover {
-    background: var(--pc-danger-line);
-    border-color: var(--pc-danger-pale);
+    background: var(--pc-danger-deep);
+    border-color: var(--pc-danger-line);
+}
+
+/* The 📁 "make this a folder" toggle in the Add-category toolbar: OFF
+   by default (a dim, barely-there icon -- typing an ordinary category
+   is the common case) and lights up to full opacity + the app's usual
+   gold "on" glow once the person opts into a folder category. */
+.pc-btn.pc-category-folder-toggle {
+    border-color: var(--pc-gold);
+    font-size: 13px;
+    opacity: 0.25;
+}
+
+.pc-btn.pc-category-folder-toggle:hover {
+    opacity: 0.55;
+}
+
+.pc-btn.pc-category-folder-toggle.pc-on {
+    opacity: 1;
+    filter: drop-shadow(0 0 2px var(--pc-gold));
+}
+
+.pc-btn.pc-category-folder-toggle.pc-on:hover {
+    opacity: 1;
 }
 
 .pc-multiselect-category-input.pc-category-invalid {
@@ -2020,9 +2122,9 @@ mark.pc-search-hit {
 }
 
 
-/* Layer C3 header chips (see executedChipStates / applyExecutedOutput):
+/* the executed-output header chips (see executedChipStates / applyExecutedOutput):
    tiny provenance badges, hidden until their own condition holds.
-   Round 9 split the single "as generated" chip into two action chips:
+   There are two action chips:
    "Edited" (composition drifted from what ran -- click copies the
    executed string) and "Reset Seed" (seed drifted -- click restores
    it), plus the red failure chip. Neutral base; state colors below. */
@@ -2067,12 +2169,12 @@ mark.pc-search-hit {
     border-color: color-mix(in srgb, var(--pc-danger) 45%, transparent);
 }
 
-/* Round 40: the chip's lift comes from the shared .pc-pressable wash;
+/* The chip's lift comes from the shared .pc-pressable wash;
    the old filter:hover was the card-text "brightness change" ghost. */
 
-/* Round 11: a drift chip still waiting for this machine's newer record
+/* A drift chip still waiting for this machine's newer record
    to land reads "Checking..." -- a soft pulse says "transient".
-   Round 41: the pulse is an inset wash, not opacity -- animating
+   The pulse is an inset wash, not opacity -- animating
    opacity composites the chip and Chromium drops subpixel text AA
    wherever that layer lives (the card-text brightness ghost). */
 .pc-exec-chip-checking {
@@ -2084,10 +2186,10 @@ mark.pc-search-hit {
     50% { box-shadow: inset 0 0 0 999px rgba(255, 255, 255, 0.30); }
 }
 
-/* Round 33: press-and-hold progress on the executed chips -- a steady
+/* press-and-hold progress on the executed chips -- a steady
    brightening says "keep holding" (duration must match HOLD_MS in
    js/press_hold.js); finishing it accepts the current state and the
-   chip goes away with the class. Round 41: same message via a paint-
+   chip goes away with the class. Same message via a paint-
    only wash flood (the old filter:keyframes pressed the ghost). */
 .pc-exec-chip-holding {
     animation: pc-chip-hold 1s linear forwards;
@@ -2099,10 +2201,194 @@ mark.pc-search-hit {
 }
 
 .pc-preview-label {
+    cursor: pointer;
     color: var(--pc-text-dim);
     font-size: 10px;
     text-transform: uppercase;
     letter-spacing: 0.5px;
+    display: flex;
+    /* letters render as individual spans so the ON state can color
+       each one independently -- see .pc-preview-label-letter below */
+    gap: 0;
+    margin-left: 1px;
+    padding: 4px;
+    background: none;
+    border-radius: 4px;
+    border: 1px solid var(--pc-btn-border);
+}
+
+.pc-preview-label.pc-on{
+    border-color: var(--pc-gold);
+    box-shadow: 0 0 12px -4px var(--pc-gold);
+}
+
+/* The PREVIEW label doubles as the colorize toggle (uiToggle applied
+   directly to a plain <div>): OFF looks exactly like a dim uppercase
+   label, so nothing changes visually until the user opts in. */
+.pc-preview-label.pc-pressable:hover {
+    color: var(--pc-text);
+    background: none;
+}
+
+.pc-preview-label-letter {
+    /* Un-set by default (OFF): inherits the dim label color as one
+       solid run of text, same as before this became a toggle. Rainbow
+       colors are applied inline per letter only while ON (see
+       ComposerUI._applyPreviewLabelColors), which is also why this
+       selector carries no color rule of its own -- an inline style
+       always wins over one anyway, but leaving this rule colorless
+       keeps the OFF state trivially "just the label" with no override
+       to undo. */
+}
+
+.pc-preview-text-wrap {
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 0;
+}
+
+.pc-preview-text-wrap .pc-preview-text {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    box-sizing: border-box;
+}
+
+/* Colorized overlay: a non-interactive div painted exactly over the
+   textarea, sized/bordered/fonted IDENTICALLY (including a transparent
+   border of the same width -- the textarea has a real 1px border, and
+   the overlay had none, which is what produced the ~1-2px jump: the
+   overlay's content box started a border-width further out than the
+   textarea's). It shows the SAME text the textarea holds, split into
+   per-section colored spans -- a plain <textarea> cannot color
+   individual runs of its own value, so the overlay is the only way to
+   tint the live preview without giving up the textarea's native
+   selection/copy/readonly behavior underneath.
+
+   It IS internally scrollable (overflow: auto) -- content past the
+   box's fixed height needs somewhere to go, and an earlier
+   overflow:hidden version just clipped it there permanently, which is
+   what "text spilling over, scroll not working" was: scrollTop is a
+   no-op on a non-scrollable element, so syncing it from the textarea
+   did nothing. Its OWN scrollbar is hidden (scrollbar-width: none +
+   the ::-webkit-scrollbar rule right below) so only the textarea's
+   real, interactive scrollbar is ever visible -- the overlay's
+   scrollTop/scrollLeft are driven programmatically from the textarea's
+   own "scroll" event instead (see ComposerUI's wiring), so the two
+   content blocks always line up and the textarea's native scrollbar/
+   wheel/keyboard scrolling keeps working exactly as it does with the
+   toggle OFF.
+
+   Hidden (display:none) whenever the toggle is OFF; only ever shown
+   together with the textarea's OWN text made transparent (see the
+   ComposerUI code that toggles .pc-preview-colorized-active), so
+   nothing ever double-paints. */
+.pc-preview-colorized {
+    position: absolute;
+    inset: 0;
+    margin: 0;
+    padding: 4px;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    box-sizing: border-box;
+    /* The CONTAINER stays click-through at all times -- text selection/
+       copy on the textarea underneath, and clicking empty space (the
+       padding, a wrapped line's trailing whitespace, the scroll gutter)
+       must always reach the textarea, never the overlay. Only the
+       individual word/label spans re-enable pointer events for
+       themselves (see .pc-preview-word below), which is what makes
+       hover-highlight and click-to-select possible WITHOUT the overlay
+       ever intercepting a drag-to-select or a click on blank space. */
+    pointer-events: none;
+    /* Must be scrollABLE (not overflow:hidden) for scrollTop to mean
+       anything at all -- an overflow:hidden element ignores scrollTop
+       entirely, which is why syncing it from the textarea's own scroll
+       position did nothing and content past the box's height was just
+       clipped forever instead of being revealed by scrolling. This is
+       real internal scrolling, kept in lockstep with the textarea's
+       (see ComposerUI's "scroll" listener) -- not a visual trick. */
+    overflow: auto;
+    /* The overlay's OWN scrollbar must never be seen or grabbed: the
+       textarea underneath already shows the one real, interactive
+       scrollbar, and pointer-events:none above already keeps clicks
+       from reaching this element at all. A second visible scrollbar
+       sitting on top of (or beside) the textarea's would look like a
+       broken double scrollbar even though only one of them does
+       anything. Firefox uses scrollbar-width; WebKit/Chromium (which is
+       what ComfyUI's Electron/CEF-style webview and every supported
+       browser here actually run) needs the ::-webkit-scrollbar rule
+       below since scrollbar-width alone leaves its scrollbar visible. */
+    scrollbar-width: none;
+    background: transparent;
+    font-family: "SFMono-Regular", Consolas, monospace;
+    font-size: 11px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    /* Must match .pc-preview-text's own box exactly for the overlay
+       text to land on the same pixels as the (now-transparent)
+       textarea text underneath it -- any divergence here reproduces
+       the same jump/misalignment this comment block exists to avoid. */
+    display: none;
+}
+
+.pc-preview-colorized::-webkit-scrollbar {
+    display: none;
+}
+
+.pc-preview-text-wrap.pc-preview-colorized-active .pc-preview-colorized {
+    display: block;
+}
+
+/* While the overlay is showing, the textarea's own glyphs are made
+   transparent (caret and selection highlight stay visible/native) so
+   only the colored overlay text is seen -- the two sit pixel-for-pixel
+   on top of each other. */
+.pc-preview-text-wrap.pc-preview-colorized-active .pc-preview-text {
+    color: transparent;
+}
+
+.pc-preview-word {
+    /* color is set inline per word, per its source section -- see
+       ComposerUI._renderColorizedPreview. This class only exists so
+       adjoining words/spaces can be told apart in devtools; it carries
+       no rule of its own for the same reason pc-preview-label-letter
+       doesn't. */
+}
+
+/* Only spans that stand for an actual prompt (an entry's own text, or
+   the locked Prompt section's synthetic run) are interactive -- a
+   join-space between two entries, or the section-name label prefix, has
+   data-pc-section-id but no data-pc-entry-id and is deliberately left
+   OUT of this selector, so hovering/clicking the gap between two words
+   of the SAME section does nothing (see _handlePreviewHover) rather
+   than looking like it belongs to whichever entry happens to be beside
+   it. Re-enables pointer-events for just this span (the overlay
+   CONTAINER stays click-through -- see .pc-preview-colorized) and shows
+   a pointer cursor as the immediate, no-JS-needed affordance that the
+   text is clickable.
+   The locked Prompt section's span (entryId-less, section-only) is
+   still included via the OR below: there's no library entry to jump
+   to, but the section itself is still a valid, sensible click target
+   (see _handlePreviewClick's fallback). */
+.pc-preview-word[data-pc-entry-id],
+.pc-preview-word[data-pc-section-id="prompt-locked"] {
+    pointer-events: auto;
+    cursor: pointer;
+}
+
+/* Applied by _handlePreviewHover to every span sharing the hovered
+   entry's id (or, for the locked Prompt section, sharing its section
+   id) -- "highlight the WHOLE prompt text from the related entry", not
+   just the word under the cursor. A background wash rather than only a
+   text-color change: the word's own text color is already its section's
+   accent (sometimes a light, low-contrast color against the dark
+   preview background), so a competing "highlight color" would fight
+   that accent on some sections and be invisible on others; a translucent
+   white wash reads as "highlighted" the same way regardless of the
+   underlying hue. */
+.pc-preview-word.pc-preview-word-hover {
+    background: rgba(255, 255, 255, 0.22);
+    border-radius: 2px;
 }
 
 .pc-preview-text {
@@ -2116,7 +2402,6 @@ mark.pc-search-hit {
     color: var(--pc-safe-light);
     font-family: "SFMono-Regular", Consolas, monospace;
     font-size: 11px;
-    line-height: 1.5;
     white-space: pre-wrap;
     word-break: break-word;
 }
@@ -2125,10 +2410,6 @@ mark.pc-search-hit {
     padding: 3px 3px 3px 3px;
     flex: 0 0 auto;
 }
-
-/* (The old "floating confirm overlay (image replace)" chrome --
-   .pc-confirm-overlay / -yes / -no -- died when the confirm dialogs
-   unified onto the backdrop+box dialog below; removed round 39.) */
 
 /* ---------- Reusable confirm/approval dialog (right-panel overlay) ---------- */
 
@@ -2220,8 +2501,8 @@ mark.pc-search-hit {
 /* Grid card: the star rides the badge row's RIGHT END without being in
  * it -- floating at bottom-right of the thumb, sharing the pills' 6px
  * floor, so the hover overlay sliding in underneath hands over
- * seamlessly and the resting state still shows without a hover. The old
- * top-center chip is retired: the thumb's top corners belong to the
+ * seamlessly and the resting state still shows without a hover. There is
+ * no top-center chip: the thumb's top corners belong to the
  * options button and the selection checkbox; the bottom corners to
  * nobody. */
 .pc-fav-star-grid {
@@ -2242,8 +2523,7 @@ mark.pc-search-hit {
  * 14px square, same pill skin as the grid variant, sitting at the
  * pills' own level and height. Invisible means GONE: display:none
  * leaves the flex row, the pills sit flush left, and the revealed
- * star pushes them right as it arrives. That push is the point
- * (round 58 restored it after one round of motionless fade-in) --
+ * star pushes them right as it arrives. That push is the point,
  * and it is safe because the pills were fitted as if the star's box
  * already existed (pinnedStar/FAV_PIN_W in badge_fit): the space the
  * star claims on reveal is space the plan conceded from the start.
@@ -2264,7 +2544,7 @@ mark.pc-search-hit {
    and always build the badge row -- reserve its height up front in every
    state, so the push is horizontal-only and no row grows and jitters its
    neighbours as the pointer crosses. The real class: callers override
-   buildOverflowBadgeRow's default (see round 52's note). */
+   buildOverflowBadgeRow's default. */
 .pc-library-card-badges:has(> .pc-fav-star) {
     min-height: 14px;
 }
@@ -2347,7 +2627,7 @@ mark.pc-search-hit {
 }
 
 /* --------------------------------------------------------------------------
- * Full-resolution thumbnail tooltip (round 20, js/thumb_preview.js).
+ * Full-resolution thumbnail tooltip (js/thumb_preview.js).
  * Mounted on document.body (outside every panel) and positioned in
  * viewport coordinates off the live pointer -- hence position:fixed, the
  * high z-index (above in-node overlays like the 9999 dialogs) and

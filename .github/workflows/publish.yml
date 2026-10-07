@@ -1,0 +1,50 @@
+# Publishes the node to the Comfy Registry whenever the version in
+# pyproject.toml changes on main.
+#
+# Save as: .github/workflows/publish_action.yml
+#
+# Requirements:
+#   - Repository secret REGISTRY_ACCESS_TOKEN (your Comfy Registry publishing API key)
+#   - pyproject.toml with a NEW, not-yet-published `version` on every release
+#   - Your default branch is "main" (change below if it is "master")
+
+name: Publish to Comfy Registry
+
+on:
+  workflow_dispatch:          # manual "Run workflow" button in the Actions tab
+  push:
+    branches:
+      - main
+    paths:
+      - "pyproject.toml"
+
+# The workflow token can only read repository contents.
+# If a run fails with a permissions error, this is the first line to loosen.
+permissions:
+  contents: read
+
+# Never run two publishes at once, and never cancel one that is mid-publish.
+concurrency:
+  group: publish-comfy-registry
+  cancel-in-progress: false
+
+jobs:
+  publish-node:
+    name: Publish Custom Node to registry
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false   # the publish step does not need git credentials
+
+      - name: Publish to Comfy Registry
+        # Official docs reference @main. For stricter supply-chain safety, pin
+        # to a full commit SHA of Comfy-Org/publish-node-action instead
+        # (find it on the action's GitHub page), e.g.:
+        #   uses: Comfy-Org/publish-node-action@<full-commit-sha>
+        uses: Comfy-Org/publish-node-action@main
+        with:
+          personal_access_token: ${{ secrets.REGISTRY_ACCESS_TOKEN }}

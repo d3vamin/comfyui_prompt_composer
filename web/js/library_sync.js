@@ -5,13 +5,12 @@
  * browser -- what to touch, given what SHOULD be on screen and what IS.
  *
  * Why: every single-prompt mutation -- starring, an edit-panel save, a
- * delete -- used to end in a full render(): N cards re-created, the
- * search filter re-applied over all of them, and the container (and
- * with it the browser's scroll position) thrown away and rebuilt across
- * chunk frames. That mismatch between the size of the change and the
- * size of the work is exactly what made the star feel unresponsive and
- * what made returning from an edit panel lag and JUMP. The rule this
- * encodes: a mutation's cost should be proportional to what it changed.
+ * delete -- must not end in a full render(): that would re-create N
+ * cards, re-apply the search filter over all of them, and throw away and
+ * rebuild the container (and with it the browser's scroll position)
+ * across chunk frames. Work out of proportion to the change makes the
+ * star feel unresponsive and makes returning from an edit panel lag and
+ * JUMP. The rule this encodes: a mutation's cost should be proportional to what it changed.
  *
  * Contract: the caller reads the DOM (refs + freshness stamps) and
  * hands that over; this decides the minimum set of node operations. No
@@ -24,21 +23,46 @@
  * `data-f-*` stamp the row builders write alongside the content, so a
  * name edit, a category change, a thumbnail replace and a re-pick all
  * make the row visibly stale without any server round trip.
+ *
+ * fCategory folds in entry.folder alongside the real embedded tags
+ * (not just entry.category) -- a folder-category RENAME changes every
+ * member prompt's `folder` string but never touches its actual
+ * `category` array, so comparing category alone judged those rows
+ * "fresh" and left their folder badge showing the old name until some
+ * unrelated change forced a full rebuild.
  */
 export function isRowFresh(element, entry) {
     const d = element && element.dataset;
     if (!d || !entry) return false;
     return d.fName === String(entry.name || "")
         && d.fPrompt === String(entry.prompt || "")
-        && d.fCategory === (entry.category || []).join("|")
+        && d.fCategory === categoryStampKey(entry)
         && d.fThumb === (entry.has_thumbnail === false ? "0" : "1");
+}
+
+/** The exact string isRowFresh/stampRowFacts compare for "same tags AND
+ * same folder membership" -- entry.category plus entry.folder (when
+ * present), joined the same way categoryBadgesFor/categoryMembershipFor
+ * order them (folder first) so the two folder-aware call sites and this
+ * stamp can never quietly drift apart on ordering. "\u0000folder\u0000"
+ * prefixes the folder segment with a byte no category name can contain,
+ * so a real category literally named the same as some OTHER prompt's
+ * folder can never collide with it in the stamp. Exported: any OTHER
+ * spot that hand-restamps dataset.fCategory (see
+ * prompt_composer.js's _paintLibraryStars) must build it through this
+ * same function, or its rows silently fall back to judging staleness on
+ * category alone -- exactly the folder-rename bug this stamp exists to
+ * catch. */
+export function categoryStampKey(entry) {
+    const real = (entry.category || []).join("|");
+    return entry.folder ? `\u0000folder\u0000${entry.folder}|${real}` : real;
 }
 
 /** Write the same stamp at build time -- one definition, no drift. */
 export function stampRowFacts(dataset, entry) {
     dataset.fName = String(entry.name || "");
     dataset.fPrompt = String(entry.prompt || "");
-    dataset.fCategory = (entry.category || []).join("|");
+    dataset.fCategory = categoryStampKey(entry);
     dataset.fThumb = entry.has_thumbnail === false ? "0" : "1";
 }
 

@@ -4,8 +4,8 @@
  * The shared chrome builders: EVERY button, toggle, counter pill and
  * the two search boxes are constructed through the factories here.
  *
- * Why: the app used to hand-build `el("button", "pc-btn pc-icon-only",
- * {...})` + `innerHTML = svgIcon(...)` at 50+ sites, each one free to
+ * Why: hand-building `el("button", "pc-btn pc-icon-only", {...})` +
+ * `innerHTML = svgIcon(...)` at 50+ sites leaves each one free to
  * drift (icon size 12 here, 13 there; hover states only on some
  * families; a pressed state on NONE). Now there is one door:
  *
@@ -67,14 +67,14 @@ export function uiBtn({ icon, size, text, title, onClick, extra = "", variant, b
     const classes = [
         ...(!bare ? ["pc-btn"] : []),
         ...(useIconOnly ? ["pc-icon-only"] : []),
-        variant === "primary" ? "pc-primary" : variant === "danger" ? "pc-danger" : "",
+        variant === "primary" ? "pc-primary" : variant === "danger" ? "pc-danger" : variant === "warn" ? "pc-warn" : "",
         "pc-pressable",
-        // Round 42: opt OUT of the hover wash -- the section-row flag
+        // Opt OUT of the hover wash -- the section-row flag
         // toggles sit inside a row that already lights on hover, and
         // the user asked for no extra background on the icons. Press
         // feedback (wash + 1px step) stays: noHover is about hover.
         ...(noHover ? ["pc-no-hover"] : []),
-        // Round 43: absolutely-positioned controls place themselves
+        // absolutely-positioned controls place themselves
         // with top/bottom -- the press STEP would clobber that anchor,
         // so the factory marks them noStep and the CSS lets them sit.
         ...(noStep ? ["pc-no-step"] : []),
@@ -95,7 +95,7 @@ export function uiBtn({ icon, size, text, title, onClick, extra = "", variant, b
 /**
  * A boolean toggle: same construction as uiBtn plus the
  * on-state affordances (ring class + icon pair + title pair)
- * resolved AT BUILD TIME. Round 41 adds `btn.applyState(on)`: the
+ * resolved AT BUILD TIME. It also offers `btn.applyState(on)`: the
  * same pairs re-applied to the LIVE node, so hosts that patch
  * in place (section-row flags) never pay for a panel rebuild
  * just to redraw a button.
@@ -104,9 +104,21 @@ export function uiBtn({ icon, size, text, title, onClick, extra = "", variant, b
  *   may be a space list, e.g. "pc-on pc-always-visible").
  *   `icon`/`title` override the pairs for stateless-icon toggles.
  */
-export function uiToggle({ on, iconOn, iconOff, titleOn, titleOff, onClass = "pc-on", icon, title, size, extra = "", onClick, bare = false, hook, hookValue, disabled, variant, noHover, noStep }) {
+export function uiToggle({ on, iconOn, iconOff, titleOn, titleOff, onClass = "pc-on", icon, text, title, size, extra = "", onClick, bare = false, hook, hookValue, disabled, variant, noHover, noStep, type }) {
     const btn = uiBtn({
         icon: icon ?? (on ? iconOn : iconOff),
+        // A static emoji/text toggle (no iconOn/iconOff swap) has no
+        // `icon` at all, so uiBtn's own useIconOnly check
+        // (Boolean(icon && !bare && !text)) would come back false and
+        // the button would fall back to plain .pc-btn sizing -- which,
+        // with no icon and no real text content to size around, has
+        // nothing to size ITSELF around either, and collapses to
+        // whatever minimum its padding alone produces. Force icon-only
+        // sizing explicitly whenever there's no icon SWAP happening, so
+        // a text/emoji-only toggle gets the same square button box a
+        // real icon would.
+        text: icon || iconOn || iconOff ? undefined : text,
+        iconOnly: icon || iconOn || iconOff ? undefined : true,
         size,
         title: title ?? (on ? titleOn : titleOff),
         onClick,
@@ -114,6 +126,7 @@ export function uiToggle({ on, iconOn, iconOff, titleOn, titleOff, onClass = "pc
         bare,
         noHover,
         noStep,
+        type,
         extra: (on && onClass ? onClass + " " : "") + extra,
         hook,
         hookValue,
@@ -125,6 +138,16 @@ export function uiToggle({ on, iconOn, iconOff, titleOn, titleOff, onClass = "pc
         const ringClasses = onClass.split(/\s+/).filter(Boolean);
         btn.applyState = (next) => {
             btn.innerHTML = svgIcon(next ? iconOn : iconOff, size);
+            if (title === undefined && (titleOn || titleOff)) btn.title = next ? titleOn : titleOff;
+            for (const c of ringClasses) btn.classList.toggle(c, !!next);
+        };
+    } else if (!icon && text !== undefined) {
+        // Static text/emoji toggle: nothing to swap in the content
+        // itself (same glyph on and off -- CSS opacity/glow is what
+        // shows the state), but the title and ring class still need to
+        // follow, exactly like the icon-swap branch above.
+        const ringClasses = onClass.split(/\s+/).filter(Boolean);
+        btn.applyState = (next) => {
             if (title === undefined && (titleOn || titleOff)) btn.title = next ? titleOn : titleOff;
             for (const c of ringClasses) btn.classList.toggle(c, !!next);
         };
@@ -205,7 +228,7 @@ export function buildSearchBox({ value = "", placeholder = "Search name, categor
     const clearButton = uiBtn({
         bare: true,
         extra: "pc-search-clear",
-        // Round 43 (user): the little x is a furnishing inside the
+        // The little x is a furnishing inside the
         // field -- no hover wash; it is absolutely placed, no step.
         noHover: true,
         noStep: true,

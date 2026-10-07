@@ -1,0 +1,2 @@
+#pc_meta {"categories": ["Lighting"]}
+flawless studio lighting using soft key light with full diffusion that eliminating shadows and uniformly illuminate the subject

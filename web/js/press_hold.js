@@ -1,5 +1,5 @@
 /**
- * press_hold.js -- the click-and-hold gesture (round 33, user request).
+ * press_hold.js -- the click-and-hold gesture.
  *
  * A small action button gets TWO verbs on one surface:
  *  - a normal click keeps whatever it always did;

@@ -7,9 +7,8 @@
  * same "keep the decision logic DOM-free and testable" seam as
  * library_sync.js.
  *
- * The race these exist to fix (see documents/Workflow_Restore_Design_Guide.md,
- * RC1): LiteGraph's graph load is synchronous -- onNodeCreated builds the
- * ComposerUI (whose PresetToolbar immediately fires an ASYNC
+ * The race these exist to fix: LiteGraph's graph load is synchronous --
+ * onNodeCreated builds the ComposerUI (whose PresetToolbar immediately fires an ASYNC
  * GET /presets), then node.configure() applies the workflow's pc_state.
  * The fetch lands afterwards and PresetToolbar's "first refresh, nothing
  * selected yet -> load preset #1" auto-load replaced the just-restored
@@ -171,7 +170,7 @@ export function mergeWorkflowContent(resolved, contents) {
 }
 
 /**
- * Layer B5's decision core: given a dead ref and the loaded workflow's
+ * Decision core for re-creating a missing prompt: given a dead ref and the loaded workflow's
  * embedded contents (object or Map), return {name, prompt, category} to
  * re-create the prompt under -- or null when there is no usable copy.
  * The name falls back to the ref's encoded stem (same rule as
@@ -190,11 +189,10 @@ export function restorePlanFor(ref, contents) {
 
 /**
  * Identity of a server /compose answer for the preview's reuse memo
- * (Layer C2). The answer depends on EVERYTHING the join reads -- the
+ * The answer depends on EVERYTHING the join reads -- the
  * section structure, the seed, and the user prompt -- so the memo key
- * must too. (A seed-only key was the frozen-preview bug from the first
- * live smoke: any edit on a fully warm cache kept showing the old
- * server string.) The embedded fallback contents deliberately stay OUT
+ * must too. (A seed-only key would freeze the preview: any edit on a
+ * fully warm cache would keep showing the old server string.) The embedded fallback contents deliberately stay OUT
  * of the key: they only ever change via setWorkflowContents()/a new
  * node load, and those paths void the memo directly.
  */
@@ -203,7 +201,7 @@ export function composeMemoKey(sections, seed, userPrompt) {
 }
 
 /**
- * Layer C3 cross-graph hygiene (pure, headless-tested): decide whether a
+ * the executed-output cross-graph hygiene (pure, headless-tested): decide whether a
  * node instance may adopt one `/c3_status` entry. The stash is
  * process-wide but node ids restart from 1 in every new workflow, so a
  * fresh node must NOT grab an old run recorded under its id. A record is
@@ -211,9 +209,16 @@ export function composeMemoKey(sections, seed, userPrompt) {
  * birth timestamp, and has not already been consumed. Server-generated
  * `at` on both sides, so no client-clock skew. Returns the record or null.
  */
-export function shouldAdoptExecuted(entry, { nodeId, baselineAt, adoptedAt }) {
+export function shouldAdoptExecuted(entry, { nodeId, baselineAt, adoptedAt, clientKey }) {
     if (!entry || entry.prompt == null || typeof entry.at !== "number") return null;
     if (String(entry.node_id) !== String(nodeId)) return null;
+    // Node id alone is ambiguous ACROSS TABS -- ids restart at 1 in
+    // every workflow, so two tabs running two graphs both record under
+    // "1". When the record carries a client_key (the page that produced
+    // it) it must be OURS. A record without one came from a client that
+    // sent none: fall back to the id-only rule so such records are
+    // still adopted.
+    if (clientKey && entry.client_key && String(entry.client_key) !== String(clientKey)) return null;
     // baselineAt === null means "not primed yet" -> adopt nothing (the
     // poller baselines first; event fast paths never consult this).
     if (baselineAt == null) return null;
@@ -243,7 +248,7 @@ export function baselineAfterHistoryLoad(baselineAt, snapshotAt) {
 }
 
 /**
- * The `user_prompt` string-input connector (round 12, user request): at
+ * The `user_prompt` string-input connector: at
  * QUEUE time ComfyUI ignores the widget and feeds the node whatever the
  * linked upstream produces -- so while the link exists, the preview must
  * show that upstream string, not the local textarea. This resolver is
@@ -254,7 +259,7 @@ export function baselineAfterHistoryLoad(baselineAt, snapshotAt) {
  *
  * Resolution order (most authoritative first):
  *  1. an upstream PromptComposer -- its _lastComposedPreview is the
- *     SERVER's own answer for what it will emit (C2 doctrine), with the
+ *     SERVER's own answer for what it will emit (the single source of truth), with the
  *     final_prompt widget as the fallback for not-yet-rendered nodes;
  *  2. any STRING-typed source slot whose node exposes a non-empty string
  *     widget (PrimitiveString, ShowText-style nodes all follow this);
@@ -289,8 +294,8 @@ export function resolveLinkedString(node, inputName = "user_prompt") {
 }
 
 /**
- * Layer C3's presentation logic (pure, so the rules are testable without
- * DOM/WS). Round 9: the single "as generated" chip became TWO
+ * the executed-output presentation logic (pure, so the rules are testable without
+ * DOM/WS). The single "as generated" chip became TWO
  * independent, action-bearing chips, each visible ONLY while its own
  * difference exists:
  *
@@ -300,7 +305,7 @@ export function resolveLinkedString(node, inputName = "user_prompt") {
  *  - `resetSeed`: current seed != executed seed -> click writes the
  *    executed seed back into the widget (reproduce the run that made
  *    the image, even after "control after generate" bumped it).
- *  - `error`: kept from round 2 -- the node ran but the chain could
+ *  - `error`: the node ran but the chain could
  *    not deliver the record; visible so nothing fails silently.
  *
  * A record always outranks an older error; no record and no error means
@@ -308,13 +313,13 @@ export function resolveLinkedString(node, inputName = "user_prompt") {
  * (seconds, server clock) renders into the tooltips as the human
  * "when"; it is optional, so widget-only restored records simply omit
  * it, and seedless records hide resetSeed (cannot reset to unknown).
- * `catchingUp` (round 11): relabels visible drift chips "Checking..."
+ * `catchingUp`: relabels visible drift chips "Checking..."
  * while the node waits for its first post-load verdict on possibly
  * queue-time-stale embedded data; labels settle by themselves.
  */
 export function executedChipStates(executed, currentComposed, currentSeed, error = null, catchingUp = false) {
     const states = { edited: null, resetSeed: null, error: null };
-    // Round 31: an empty executed string is a REAL record (the node ran
+    // An empty executed string is a REAL record (the node ran
     // and emitted nothing) -- it takes part in the honest compare below
     // instead of hiding every chip. Only a missing record (never ran /
     // never adopted) is "nothing to say".
@@ -354,7 +359,7 @@ export function executedChipStates(executed, currentComposed, currentSeed, error
             tooltip:
                 "The composition has changed since this node last ran" + when +
                 ". The executed string that produced the current output:\n\n" +
-                // Round 31: an empty executed string would render as an
+                // An empty executed string would render as an
                 // empty tooltip block; say what it is. (The COPY action
                 // still hands out the real "" via `text`.)
                 (executed.prompt === "" ? "(empty)" : executed.prompt) +
@@ -378,7 +383,7 @@ export function executedChipStates(executed, currentComposed, currentSeed, error
         };
     }
     if (catchingUp) {
-        // Round 11: while the round-10 catch-up probe is still pending,
+        // While the round-10 catch-up probe is still pending,
         // a difference chip derived from a QUEUE-TIME-BAKED embed may be
         // asserting the previous run's value. The chip and its action
         // stay (the embedded data is still the best available until the
@@ -404,7 +409,7 @@ export function executedChipStates(executed, currentComposed, currentSeed, error
 /**
  * Assemble the self-contained `pc_workflow_snapshot` a workflow carries
  * so it can be opened on a machine WITHOUT the prompts it references
- * (see design guide Layer B, write side).
+ * (the "write side" of workflow restore).
  *
  * `contents` is the PreviewController cache view (ref -> {name, prompt,
  * category}) -- a superset spanning everything ever resolved. Only refs
@@ -415,7 +420,7 @@ export function executedChipStates(executed, currentComposed, currentSeed, error
  * assembled string even when some individual texts are dropped.
  *
  * `preset.sections` intentionally duplicates `pc_state`: the snapshot is
- * designed to stand alone (a future layer may retire pc_state).
+ * designed to stand alone, independent of pc_state.
  */
 export function buildSnapshotPayload({
     schema = PC_SNAPSHOT_SCHEMA,
@@ -467,13 +472,13 @@ export function buildSnapshotPayload({
         seed,
         user_prompt: userPrompt || "",
         truncated,
-        // Layer C3: the LITERAL executed string from the node's last
+        // The LITERAL executed string from the node's last
         // queued run (fetched from the server's stash), when there was
         // one since the last clear. Additive on schema 1: readers must
         // treat these keys as optional. final_prompt above stays "what
         // the current state would compose" -- this is "what actually
         // ran", and the two can legitimately differ after edits.
-        // Round 31: "" is baked too (an empty run IS a record); only a
+        // "" is baked too (an empty run IS a record); only a
         // never-run node omits the keys.
         ...(executed && typeof executed.prompt === "string"
             ? {

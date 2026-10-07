@@ -1,0 +1,13 @@
+[project]
+name = "comfyui_prompt_composer"
+description = "Build, organize, and randomize prompts from a disk-backed, drag-and-droppable library of reusable prompt entries, with sections, presets, and queue-time randomization."
+version = "1.0.261007"
+license = { file = "LICENSE" }
+
+[project.urls]
+Repository = "https://github.com/d3vamin/comfyui_prompt_composer"
+
+[tool.comfy]
+PublisherId = "devamin"
+DisplayName = "Prompt Composer"
+Icon = ""

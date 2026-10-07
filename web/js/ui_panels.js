@@ -42,9 +42,13 @@ import * as apiClient from "./api_client.js";
 import {
     isFavoriteCategory,
     isFavoriteEntry,
-    withoutFavorite,
     withFavoritePinned,
     buildFavoriteStar,
+    categoryBadgesFor,
+    categoryMembershipFor,
+    isFolderPseudoCategory,
+    folderPseudoCategoryName,
+    FOLDER_CATEGORY_PREFIX,
 } from "./favorites.js";
 
 // ---------------------------------------------------------------------------
@@ -161,7 +165,7 @@ export function createConfirmDialog(hostPanel) {
 // ---------------------------------------------------------------------------
 
 /**
- * The alert chip: an ICON-ONLY button (round 28: alertTriangle glyph)
+ * The alert chip: an ICON-ONLY button (alertTriangle glyph)
  * sitting LEFT of the section counter on section rows. It is RED while
  * the section holds entries whose prompts resolve to NOTHING
  * (library-missing and no workflow-snapshot stand-in either), and
@@ -223,7 +227,7 @@ function buildAlertChip(alertKey, counts, armed, onToggle) {
 export function renderLeftPanel(leftPanel, { state, countVisible, isLibraryActive, libraryColor, visibleOnlySectionId = null, alertCountsFor = null, alertsOnlyMode = null, onToggleAlertFilter, onOpenLibrary, onOpenLibraryColorEdit, onSelectSection, onOpenSectionEdit, onAddSection, onDropLibraryPrompts, onDropCrossSectionEntries, onToggleCountFilter, onSectionFlagsChanged }) {
     // The section toolbar (buildStaticLayout's this.sectionToolbar) is
     // appended into leftPanel ONCE, permanently, above everything this
-    // function manages -- per spec, the Left Panel's top-to-bottom
+    // function manages -- the Left Panel's top-to-bottom
     // contents are: Section toolbar, section list, Add section button.
     // Clearing leftPanel.innerHTML unconditionally would wipe that
     // toolbar out on every render, so instead we remove and rebuild
@@ -237,13 +241,12 @@ export function renderLeftPanel(leftPanel, { state, countVisible, isLibraryActiv
 
     // "Library" is not a real section -- it never contributes to
     // compose, is never saved into presets, and has no entries/
-    // randomize/separator/label properties (per spec: "It only has
-    // the Color property"). It's rendered here as a synthetic first
+    // randomize/separator/label properties (it only has the Color
+    // property). It's rendered here as a synthetic first
     // row, pinned above even the locked "Prompt" row, and is NOT
-    // draggable/reorderable ("it will sit on the top of the section
-    // list and can not move"). Its only per-row action is a color
-    // swatch (opens a minimal color-only edit), matching "Library...
-    // It only has the Color property (Default color: Blue)".
+    // draggable/reorderable (it sits at the top of the section list and
+    // cannot move). Its only per-row action is a color swatch (opens a
+    // minimal color-only edit); the default color is Blue.
     const libraryRow = el("div", "pc-section-row pc-library-row" + (isLibraryActive ? " pc-active-row" : ""));
     if (libraryColor) {
         libraryRow.style.background = `color-mix(in srgb, ${libraryColor} 25%, #262626)`;
@@ -324,7 +327,7 @@ export function renderLeftPanel(leftPanel, { state, countVisible, isLibraryActiv
             extra: "pc-icon-btn",
             onClick: (e) => {
                 e.stopPropagation();
-                // Round 41: a section's Enable/Disable redraws its OWN
+                // A section's Enable/Disable redraws its OWN
                 // row (icon, ring, dim + tint) and recomposes; it never
                 // changes the entry grid -- so patch in place and let
                 // the light chrome-notify do the rest. No list rebuild.
@@ -374,15 +377,15 @@ export function renderLeftPanel(leftPanel, { state, countVisible, isLibraryActiv
 
         const name = el("div", "pc-section-name", { text: section.name });
 
-        // "N visible / M total" pill -- and (round 21) the sole entry
+        // "N visible / M total" pill -- and the sole entry
         // point for the VISIBLE-ONLY view filter: click arms it for this
         // section (selecting it first if needed); click again on the
         // ringed, active row disarms. The green 2px ring is .pc-on and
         // rides ONLY the active row, because the filter narrows exactly
         // one panel -- the one you are looking at. dataset.sectionCountFilter
         // is the in-place patch hook (see _patchSectionCountRing).
-        // Round 21b: at zero visible the pill is INERT -- tooltip "No
-        // visible entries", no ring, and no arming. Round 21c: that
+        // At zero visible the pill is INERT -- tooltip "No
+        // visible entries", no ring, and no arming. That
         // decision is made LIVE inside one permanently-attached handler
         // (re-ask countVisible on every click) instead of attaching/
         // detaching handlers per state -- a chip that became non-empty
@@ -417,7 +420,7 @@ export function renderLeftPanel(leftPanel, { state, countVisible, isLibraryActiv
                   extra: "pc-end-separator-btn",
                   onClick: (e) => {
                       e.stopPropagation();
-                      // Round 41: cycling redraws just this button (the
+                      // Cycling redraws just this button (the
                       // post-build apply below owns title + glyph), no
                       // list rebuild.
                       section.end_separator = cycleEndSeparator(section.end_separator);
@@ -429,7 +432,7 @@ export function renderLeftPanel(leftPanel, { state, countVisible, isLibraryActiv
         const applyEndSep = () => {
             const endSeparator = normalizeEndSeparator(section.end_separator);
             endSepBtn.title = `End separator for "${section.name}" (click to cycle): ${endSeparator}`;
-            // Round 59: pc-always-visible means what it already means on
+            // pc-always-visible means what it already means on
             // the entry separator button -- "this flag is SET, light the
             // control gold". The section-row button is always laid out,
             // so here the class rides as color only (see CSS).
@@ -439,7 +442,7 @@ export function renderLeftPanel(leftPanel, { state, countVisible, isLibraryActiv
         };
         if (endSepBtn) applyEndSep();
 
-        // Round 42: one closure per row that re-derives ALL flag chrome
+        // One closure per row that re-derives ALL flag chrome
         // from the section's LIVE state. The bulk section toolbar (Show
         // all / Randomize OFF for all / ...) flips these same flags for
         // every section at once and calls this for each mounted row --
@@ -454,7 +457,7 @@ export function renderLeftPanel(leftPanel, { state, countVisible, isLibraryActiv
         };
 
         const meta = el("div", "pc-section-row-meta");
-        // Round 26: alert chip LEFT of the counter pill -- built on EVERY
+        // Alert chip LEFT of the counter pill -- built on EVERY
         // row (locked ones included; they have no pill but can absolutely
         // have dead or workflow-copy cards) and hidden at 0/0, so the
         // in-place patcher always finds the node.
@@ -667,12 +670,12 @@ export function buildBulkActionToolbar({
     // something is selected, so in practice this always renders; the guard
     // keeps a caller from ever getting a bar that says "0 selected".
     if (count > 0) {
-        // The count is also the "show only selected" VIEW toggle (round 17):
+        // The count is also the "show only selected" VIEW toggle:
         // clicking it narrows the panel to exactly these cards via the
         // panel's ordinary display filter pass -- it changes no state, and
-        // clicking again widens back out. It used to clear the selection on
-        // click; that command has its own Deselect-all button right here,
-        // so nothing was lost. While ON, .pc-on draws the green 2px ring (css):
+        // clicking again widens back out. It deliberately does not clear the
+        // selection; that has its own Deselect-all button right here.
+        // While ON, .pc-on draws the green 2px ring (css):
         // the number you can SEE through is ringed. The dataset-hook
         // doctrine applies: the bar is rebuilt whole, the in-place patch
         // looks the chip up by attribute.
@@ -817,9 +820,8 @@ export function buildEntryToolbar(section, { viewMode, searchVisible, hasClipboa
  * card body toggles ONE flag that serves two purposes at once --
  * whether this entry is included in the composed output (entry.visible)
  * AND whether it counts toward the entry toolbar's bulk-action
- * selection (selected/highlighted, used for copy/cut/delete). These were
- * previously two separate concepts; per an explicit product decision,
- * grid cards now treat them as the same thing: a highlighted card IS
+ * selection (selected/highlighted, used for copy/cut/delete). These are
+ * deliberately treated as the same thing on grid cards: a highlighted card IS
  * an included-in-output card, and vice versa. This means copy/cut/
  * delete in the entry toolbar always act on exactly the currently-
  * included entries -- there is no way to bulk-select entries for those
@@ -828,8 +830,7 @@ export function buildEntryToolbar(section, { viewMode, searchVisible, hasClipboa
  * separate concepts (its own dedicated check/x button for inclusion,
  * row click for bulk-select).
  *
- * The card's top-left button, which used to BE the inclusion toggle,
- * is now the Options/Edit button (matching the Library card's pencil
+ * The card's top-left button is the Options/Edit button (matching the Library card's pencil
  * button) -- clicking it opens the Edit Prompt panel for
  * the prompt_data this entry points to, exactly like the Library
  * card's own options button.
@@ -925,7 +926,7 @@ function wireEntryDrag(element, section, entry, { vertical }) {
  * workflow's pc_workflow_snapshot (see workflow_restore.js
  * mergeWorkflowContent). It is deliberately not the red "(Missing)"
  * treatment -- the person can see the prompt, which is the whole point.
- * Clicking asks the host to SAVE the copy into the library (Layer B5):
+ * Clicking asks the host to SAVE the copy into the library:
  * same name, same text, categories carried too; the server's collision
  * rules apply and on success the live entry takes the card over.
  */
@@ -1001,7 +1002,7 @@ export function buildNoThumbnailPlaceholder() {
  * library_store.decode_prompt_name) -- the filename's underscore
  * encoding is deliberately invisible here.
  *
- * Round 35: the blob moved into the shared engine (sectionSearchBlob)
+ * The blob moved into the shared engine (sectionSearchBlob)
  * and now includes the category names -- the same word-AND haystack
  * the Library rows stamp, so "red cat" works identically in either
  * panel. The blob stays the FALLBACK matcher only: rows the resolve
@@ -1013,8 +1014,22 @@ export function buildNoThumbnailPlaceholder() {
 export function entrySearchDataset(entry, display) {
     return {
         searchText: sectionSearchBlob(entry, display),
-        categories: JSON.stringify(display?.category || []),
-        // Round 27: the row-26 alert status, stamped on the CARD itself
+        // categoryMembershipFor (Favorite INCLUDED, unlike
+        // categoryBadgesFor which the row's own visible badges use --
+        // see both functions' comments), folder pseudo-category
+        // prepended when display.folder is set. This is the array
+        // _applySectionRow's live category filter reads back out of
+        // the DOM (node.dataset.categories) to decide whether a row
+        // matches the selected category -- it has to include Favorite
+        // (selecting "Favorite" from the dropdown must still match a
+        // Favorite-tagged entry, even though the card's own badge row
+        // omits a redundant "Favorite" pill) and the folder (without
+        // it, selecting a folder pseudo-category in the section's own
+        // search toolbar could never match anything: the dropdown
+        // offers the option, but every row's stamped category list
+        // would lack it, so display:none applied to every card).
+        categories: JSON.stringify(categoryMembershipFor(display)),
+        // The row-26 alert status, stamped on the CARD itself
         // so the alert filter (chip toggle) is one dataset read per card,
         // exactly like the visibility class -- and it can never disagree
         // with what the row's "!" chip counts, because both classify the
@@ -1080,7 +1095,7 @@ export function buildEntryCard(section, entry, display, { selected, onToggleVisi
             });
             imageWrap.append(img);
         }
-        imageWrap.append(buildThumbnailOverlay(display.prompt, withoutFavorite(display.category)));
+        imageWrap.append(buildThumbnailOverlay(display.prompt, categoryBadgesFor(display)));
         // An entry is a pointer into the library, so the star here REPORTS
         // the prompt's favorite state rather than changing it -- flipping
         // it from inside a section would silently edit a library record.
@@ -1130,9 +1145,9 @@ export function buildEntryCard(section, entry, display, { selected, onToggleVisi
     const optionsBtn = uiBtn({
         bare: true,
         extra: "pc-entry-options-btn",
-        noStep: true, // absolute overlay (round 43)
+        noStep: true, // absolute overlay
         icon: "edit",
-        size: 12,
+        size: 16,
         title: "Edit prompt",
         onClick: (e) => {
             e.stopPropagation();
@@ -1220,7 +1235,7 @@ export function buildEntryListRow(section, entry, display, { selected, onToggleV
         extra: "pc-entry-options-btn pc-entry-row-options-overlay",
         noStep: true,
         icon: "edit",
-        size: 12,
+        size: 16,
         title: "Edit prompt",
         onClick: (e) => {
             e.stopPropagation();
@@ -1239,7 +1254,7 @@ export function buildEntryListRow(section, entry, display, { selected, onToggleV
         if (display.from_workflow) name.append(buildWorkflowCopyBadge(onRestore || onReplace));
         const promptText = el("div", "pc-entry-row-prompt", { text: listPromptPreview(display.prompt) });
         textWrap.append(name, promptText);
-        const badgeCategories = withoutFavorite(display.category);
+        const badgeCategories = categoryBadgesFor(display);
         // The favorite IS a category, so it rides the badge row as its
         // FIRST badge -- same level, same height as its siblings. A
         // section row only ever builds it when the prompt actually is a
@@ -1340,9 +1355,8 @@ export function buildEntryListRow(section, entry, display, { selected, onToggleV
  * Minimal edit panel for the "Library" row's only property (its
  * accent color). Library is not a real section -- it has no name to
  * rename, no label/end-separator, and can't be deleted -- so this is
- * deliberately smaller than renderSectionEditPanel. Round 40 (user):
- * the color row is the section panel's own (picker + randomize).
- * Round 41 (user): the draft is STAGED like the other panels -- the
+ * deliberately smaller than renderSectionEditPanel. The color row is the section panel's own (picker + randomize).
+ * The draft is STAGED like the other panels -- the
  * picker and randomize only move the swatch; Done applies, Cancel
  * discards. Nothing hits the library until a button is pressed.
  */
@@ -1381,7 +1395,7 @@ export function renderLibraryColorEditPanel(rightPanel, currentColor, { onSave, 
     rightPanel.append(panel);
 }
 
-export function renderSectionEditPanel(rightPanel, section, { state, onClose, onDelete, confirmDialog }) {
+export function renderSectionEditPanel(rightPanel, section, { state, onClose, onDelete, confirmDialog, onColorChange }) {
     const originalSection = {
         name: section.name,
         color: section.color,
@@ -1407,6 +1421,11 @@ export function renderSectionEditPanel(rightPanel, section, { state, onClose, on
     colorInput.value = section.color;
     colorInput.addEventListener("change", () => {
         section.color = colorInput.value;
+        // Live-refresh the preview colorization (if it's ON) without a
+        // full app render -- see the call site's comment for why: a
+        // full render would rebuild this very panel and drop the
+        // color picker mid-interaction.
+        if (onColorChange) onColorChange();
     });
     const randomColorButton = uiBtn({
         icon: "reload",
@@ -1416,6 +1435,7 @@ export function renderSectionEditPanel(rightPanel, section, { state, onClose, on
         onClick: () => {
             section.color = randomColor();
             colorInput.value = section.color;
+            if (onColorChange) onColorChange();
         },
     });
     colorRow.append(colorInput, randomColorButton);
@@ -1433,7 +1453,7 @@ export function renderSectionEditPanel(rightPanel, section, { state, onClose, on
     });
     endSepRow.append(endSepSelect);
 
-    const labelRow = el("div", "pc-checkbox-field");
+    const labelRow = el("div", "pc-field-row");
     const labelCheckbox = el("input", null, { type: "checkbox" });
     labelCheckbox.checked = !!section.show_label;
     labelCheckbox.addEventListener("change", () => {
@@ -1512,7 +1532,7 @@ export function renderSectionEditPanel(rightPanel, section, { state, onClose, on
  * @returns {HTMLElement} the overlay element
  */
 export function buildThumbnailOverlay(promptText, categories) {
-    const MAX_PROMPT_CHARS = 140; // keeps the tooltip a fixed, small size -- no scroll, per spec
+    const MAX_PROMPT_CHARS = 140; // keeps the tooltip a fixed, small size -- no scroll
     const text = (promptText || "").trim();
     const overlay = el("div", "pc-entry-image-overlay");
     if (text) {
@@ -1531,7 +1551,7 @@ export function buildThumbnailOverlay(promptText, categories) {
 /**
  * Renders `items` as a horizontal row of small pill badges (matching
  * .pc-badge's existing look), capped to the row's actual available
- * width. Round 57 grammar: as many badges as fit show WHOLE; when the
+ * width. As many badges as fit show WHOLE; when the
  * next one wouldn't, THAT one is shown CLIPPED (its text ends in an
  * ellipsis -- .pc-badge-clip) and only what comes after it collapses
  * into a "+N" pill -- `Extra` `Light` `last categ...` [+2]. Nothing
@@ -1540,17 +1560,14 @@ export function buildThumbnailOverlay(promptText, categories) {
  * field's summary text (see buildMultiSelectDropdown's fitSummaryText)
  * keeps its older drop-trim because it is one text run, not pills.
  *
- * The measuring is NOT done here any more. It used to be: a per-row
- * requestAnimationFrame plus a per-row ResizeObserver, each one reading
- * clientWidth/scrollWidth -- and every such read forces a synchronous
- * layout of the WHOLE document. The trim loop did it once per badge
- * candidate, on every row, while the chunked fill was still appending
- * siblings: hundreds of full-document relayouts per load, which is why
- * list-view rows (a badge row per row) cost several times what a grid
- * card does. js/badge_fit.js now batches all rows into one pass with
+ * The measuring is NOT done here. Per-row measuring (a
+ * requestAnimationFrame plus a ResizeObserver per row, each reading
+ * clientWidth/scrollWidth) would force a synchronous layout of the WHOLE
+ * document once per badge candidate on every row, while the chunked fill
+ * is still appending siblings -- hundreds of full-document relayouts per
+ * load. js/badge_fit.js instead batches all rows into one pass with
  * reads before writes and a shared observer, and caches per-label badge
- * widths so a repeated category is measured once ever. The look is
- * unchanged; only when-and-how-often we measure moved.
+ * widths so a repeated category is measured once ever.
  *
  * @param {string[]} items - values to show as badges, in display order
  * @param {string} [rowClassName="pc-badge-row"] - class for the row element
@@ -1599,7 +1616,23 @@ export function buildOverflowBadgeRow(items, rowClassName = "pc-badge-row") {
  *   full updated selection (as an array) after every toggle
  * @returns {HTMLElement} the dropdown's root element
  */
-function buildMultiSelectDropdown(options, initialSelected, onChange, { onCreateCategory, onRenameCategory, onDeleteCategory, confirmDialog } = {}) {
+/** Inverse of folderPseudoCategoryName (favorites.js): "📁 Outfits" ->
+ * "Outfits". Trivial, but kept as a named helper (mirroring the
+ * server's own folder_name_from_pseudo_category) so every place that
+ * needs to go from the display form back to the plain on-disk name
+ * reads the same way. Returns the input unchanged if it isn't actually
+ * a folder pseudo-category (callers only call this after already
+ * checking isFolderPseudoCategory). */
+function folderNameFromPseudo(pseudoCategory) {
+    return isFolderPseudoCategory(pseudoCategory)
+        ? pseudoCategory.slice(FOLDER_CATEGORY_PREFIX.length).trim()
+        : pseudoCategory;
+}
+
+function buildMultiSelectDropdown(options, initialSelected, onChange, {
+    onCreateCategory, onRenameCategory, onDeleteCategory, confirmDialog,
+    folderOptions, initialSelectedFolder, onFolderChange,
+} = {}) {
     const root = el("div", "pc-multiselect");
     // Favorite first, everything else as supplied (already alphabetical
     // from the library controller). `withFavoritePinned` also adds it if
@@ -1607,8 +1640,24 @@ function buildMultiSelectDropdown(options, initialSelected, onChange, { onCreate
     // user sees at the top.
     const categoryOptions = withFavoritePinned(Array.from(new Set(options || [])));
     let selected = new Set(initialSelected || []);
+    // Folder categories are a SEPARATE, single-select concept layered
+    // above the ordinary multi-select tags: a prompt lives in at most
+    // one library subfolder (or none), mirroring the one-`folder`-field
+    // on-disk reality (see library_store.update_prompt_data's `folder`
+    // param). `selectedFolder` holds the PLAIN (unprefixed) folder name,
+    // e.g. "Outfits", or null for "not in any folder" -- never the
+    // "📁 " display form, which is reconstructed only for rendering.
+    const folderNames = Array.from(new Set(folderOptions || [])).sort((a, b) =>
+        a.toLowerCase().localeCompare(b.toLowerCase())
+    );
+    let selectedFolder = initialSelectedFolder || null;
     let isOpen = false;
     let editCategory = null;
+    // Distinguishes which bucket editCategory (an ordinary category
+    // name, or a plain folder name) belongs to while the rename/add
+    // toolbar is open, since the two are saved through different
+    // callbacks and rendered as different display strings.
+    let editIsFolder = false;
 
     const summaryBtn = uiBtn({ bare: true, extra: "pc-multiselect-summary pc-text-input", type: "button" });
     // Two children instead of plain textContent: a text span for
@@ -1629,19 +1678,59 @@ function buildMultiSelectDropdown(options, initialSelected, onChange, { onCreate
 
     function closeCategoryToolbar() {
         editCategory = null;
+        editIsFolder = false;
         categoryToolbar.style.display = "none";
         categoryToolbar.innerHTML = "";
+        addCategoryBtn.disabled = false;
     }
 
-    function openCategoryToolbar(category = null) {
+    /**
+     * @param {string|null} category - the plain (unprefixed for a
+     *   folder) name being renamed, or null when adding a brand-new
+     *   category (the "Add category" row). Whether a fresh add becomes
+     *   an ordinary category or a folder category is decided by the
+     *   📁 toggle button next to the input, not by anything typed into
+     *   it -- see the toggle's wiring below.
+     * @param {boolean} isFolder - true when `category` is an existing
+     *   FOLDER being renamed (its plain name, not the "📁 " display
+     *   form -- that prefix is re-added only where it's shown/sent).
+     */
+    function openCategoryToolbar(category = null, isFolder = false) {
         editCategory = category;
+        editIsFolder = isFolder;
         panel.style.display = "none";
         categoryToolbar.innerHTML = "";
         categoryToolbar.style.display = "flex";
+        // Disabled for the whole time the inline toolbar is open (any
+        // row's rename, or a fresh add) so a second click can't stack
+        // a second toolbar instance -- re-enabled by closeCategoryToolbar,
+        // whether that's Cancel or a completed save.
+        addCategoryBtn.disabled = true;
+
+        // "Is this new category a folder?" toggle: only meaningful for
+        // a FRESH add (renaming already knows what it is from
+        // `isFolder`), OFF by default -- typing an ordinary name is the
+        // common case, so a folder must be opted into rather than
+        // triggered by a magic prefix the person has to remember.
+        let makeFolder = false;
+        const folderToggle = category
+            ? null
+            : uiToggle({
+                  on: false,
+                  text: "📁",
+                  titleOff: "Make this a folder category",
+                  titleOn: "Folder category (creates a library subfolder)",
+                  type: "button",
+                  extra: "pc-category-folder-toggle",
+                  onClick: () => {
+                      makeFolder = !makeFolder;
+                      folderToggle.applyState(makeFolder);
+                      validate();
+                  },
+              });
 
         const addButton = uiBtn({
             icon: "check",
-            size: 13,
             title: category ? "Save category name" : "Add category",
             type: "button",
             extra: "pc-category-add-button",
@@ -1649,7 +1738,6 @@ function buildMultiSelectDropdown(options, initialSelected, onChange, { onCreate
 
         const cancelButton = uiBtn({
             icon: "cancel",
-            size: 13,
             title: "Cancel",
             type: "button",
             extra: "pc-category-cancel-button",
@@ -1658,15 +1746,23 @@ function buildMultiSelectDropdown(options, initialSelected, onChange, { onCreate
 
         const input = el("input", "pc-text-input pc-multiselect-category-input", {
             type: "text",
-            placeholder: category ? "Rename category" : "New category",
+            placeholder: category
+                ? (isFolder ? "Rename folder category" : "Rename category")
+                : "New category",
         });
+        // A folder being renamed is edited by its PLAIN name (so the
+        // person edits "Outfits", not "📁 Outfits") but re-sent to the
+        // server with the marker restored -- see addButton's handler.
         input.value = category || "";
 
         const validate = () => {
             const value = input.value.trim();
-            const duplicate = categoryOptions.some(
-                (option) => option.toLowerCase() === value.toLowerCase() && option !== category
-            );
+            const treatAsFolder = isFolder || makeFolder;
+            const duplicate = treatAsFolder
+                ? folderNames.some((f) => f.toLowerCase() === value.toLowerCase() && f !== category)
+                : categoryOptions.some(
+                      (option) => option.toLowerCase() === value.toLowerCase() && option !== category
+                  );
             input.classList.toggle("pc-category-invalid", !!value && duplicate);
             addButton.disabled = !value || duplicate;
         };
@@ -1675,11 +1771,43 @@ function buildMultiSelectDropdown(options, initialSelected, onChange, { onCreate
             const value = input.value.trim();
             if (!value || addButton.disabled) return;
             try {
-                if (category) {
+                if (isFolder) {
+                    // Renaming an existing folder: always resend with
+                    // the reserved marker on BOTH ends -- 
+                    // library_store.rename_category routes purely off
+                    // the OLD name's prefix, but the NEW name is what
+                    // ends up as the actual directory's display form.
+                    const newFolderPseudo = folderPseudoCategoryName(value);
+                    await onRenameCategory?.(folderPseudoCategoryName(category), newFolderPseudo);
+                    const newFolderName = folderNameFromPseudo(newFolderPseudo);
+                    const index = folderNames.indexOf(category);
+                    if (index >= 0) folderNames[index] = newFolderName;
+                    folderNames.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+                    if (selectedFolder === category) selectedFolder = newFolderName;
+                } else if (category) {
                     await onRenameCategory?.(category, value);
                     const index = categoryOptions.indexOf(category);
                     if (index >= 0) categoryOptions[index] = value;
                     if (selected.delete(category)) selected.add(value);
+                } else if (makeFolder) {
+                    // Fresh add with the 📁 toggle ON: create_category
+                    // routes a "📁 "-prefixed name to a real on-disk
+                    // folder server-side (see
+                    // library_store.create_category), and the newly
+                    // made folder becomes this prompt's selection --
+                    // same as ticking any other freshly-created
+                    // category would, but exclusive (see "None" below).
+                    // create_folder_category is idempotent (a name
+                    // matching an EXISTING folder just selects it,
+                    // rather than erroring) -- mirror that here so the
+                    // local folderNames list doesn't gain a duplicate.
+                    const pseudo = folderPseudoCategoryName(value);
+                    await onCreateCategory?.(pseudo);
+                    if (!folderNames.some((f) => f.toLowerCase() === value.toLowerCase())) {
+                        folderNames.push(value);
+                        folderNames.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+                    }
+                    selectedFolder = value;
                 } else {
                     await onCreateCategory?.(value);
                     categoryOptions.push(value);
@@ -1688,13 +1816,15 @@ function buildMultiSelectDropdown(options, initialSelected, onChange, { onCreate
                 closeCategoryToolbar();
                 renderPanel();
                 renderSummary();
-                onChange(Array.from(selected));
+                if (isFolder || makeFolder) onFolderChange?.(selectedFolder);
+                else onChange(Array.from(selected));
             } catch (err) {
                 input.classList.add("pc-category-invalid");
                 input.title = err.message || "Category operation failed";
             }
         });
 
+        if (folderToggle) categoryToolbar.append(folderToggle);
         categoryToolbar.append(input, addButton, cancelButton);
         input.focus();
         validate();
@@ -1753,7 +1883,12 @@ function buildMultiSelectDropdown(options, initialSelected, onChange, { onCreate
 
     let lastFitItems = [];
     function renderSummary() {
-        lastFitItems = Array.from(selected).sort();
+        // The folder (if any) leads the summary -- "where does this
+        // live" reads first, same ordering rationale as
+        // getAllCategoriesWithFolders() -- followed by the ordinary
+        // tags, alphabetical.
+        const folderLabel = selectedFolder ? [folderPseudoCategoryName(selectedFolder)] : [];
+        lastFitItems = [...folderLabel, ...Array.from(selected).sort()];
         // Deferred one frame so the button has already been laid out
         // (and reflects any just-applied selection change) before we
         // measure it -- matches the rAF-based post-layout measurement
@@ -1767,6 +1902,56 @@ function buildMultiSelectDropdown(options, initialSelected, onChange, { onCreate
 
     function renderPanel() {
         panel.innerHTML = "";
+
+        // Folder categories lead the list, alphabetically, ahead of
+        // "None" and every ordinary category -- "where does
+        // this live" is offered before "what else is it tagged", the
+        // same ordering LibraryController.getAllCategoriesWithFolders()
+        // already uses for the search toolbar's dropdown. Single-select
+        // and exclusive with EACH OTHER (picking one clears any other
+        // folder pick) but independent of the ordinary multi-select
+        // checkboxes below, and of "None" -- selecting "None" clears
+        // only the ordinary tags; a folder membership is a different
+        // kind of fact (where the file lives on disk) and is left
+        // alone.
+        for (const folderName of folderNames) {
+            const pseudo = folderPseudoCategoryName(folderName);
+            const row = el("label", "pc-checkbox-field pc-multiselect-option pc-multiselect-folder-option");
+            const cb = el("input", null, { type: "checkbox" });
+            cb.checked = selectedFolder === folderName;
+            cb.addEventListener("change", () => {
+                // Ticking the box that's already the selection is a
+                // no-op change event in the exclusive-set sense, but a
+                // checkbox naturally toggles itself off on a second
+                // click -- honor that as "leave this folder" rather
+                // than fighting the control back to checked.
+                selectedFolder = cb.checked ? folderName : null;
+                renderPanel();
+                renderSummary();
+                onFolderChange?.(selectedFolder);
+            });
+            const labelText = el("span", "pc-multiselect-option-label", { text: " " + pseudo });
+            const actions = el("span", "pc-multiselect-option-actions");
+            // Folders are rename-only, never delete-able from here (no
+            // "un-become a folder" action -- the directory stays on
+            // disk regardless of whether anything is currently filed
+            // into it), so only an edit button is offered.
+            const editButton = uiBtn({
+                icon: "edit",
+                size: 12,
+                title: `Rename folder category "${pseudo}"`,
+                type: "button",
+                onClick: (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    close();
+                    openCategoryToolbar(folderName, true);
+                },
+            });
+            actions.append(editButton);
+            row.append(cb, labelText, actions);
+            panel.append(row);
+        }
 
         const noneRow = el("label", "pc-checkbox-field pc-multiselect-option");
         const noneCb = el("input", null, { type: "checkbox" });
@@ -1846,19 +2031,6 @@ function buildMultiSelectDropdown(options, initialSelected, onChange, { onCreate
             row.append(cb, labelText, actions);
             panel.append(row);
         }
-
-        const addRow = uiBtn({
-            bare: true,
-            extra: "pc-multiselect-option pc-multiselect-add-category",
-            type: "button",
-            title: "Add category",
-            onClick: () => {
-                close();
-                openCategoryToolbar();
-            },
-        });
-        addRow.innerHTML = `${svgIcon("plus", 12)}<span>Add category</span>`;
-        panel.append(addRow);
     }
 
     function open() {
@@ -1888,6 +2060,26 @@ function buildMultiSelectDropdown(options, initialSelected, onChange, { onCreate
         else open();
     });
 
+    // "Add category" lives OUTSIDE the dropdown field itself, to its
+    // right -- same row, same icon-only green look as every other
+    // "+" add affordance in this UI (buildEntryToolbar's btnAdd is the
+    // other user of .pc-add-entry-btn). Disabled the moment the inline
+    // create/rename toolbar opens (for ANY row, not just a fresh add --
+    // see openCategoryToolbar/closeCategoryToolbar toggling it) so a
+    // second click can't stack a second toolbar instance while one is
+    // already mid-edit; only closing (Cancel, Save, or a completed
+    // create/rename) re-enables it.
+    const addCategoryBtn = uiBtn({
+        icon: "plus",
+        title: "Add category",
+        type: "button",
+        extra: "pc-add-entry-btn",
+        onClick: () => {
+            close();
+            openCategoryToolbar();
+        },
+    });
+
     // The very first fit pass (triggered by renderSummary() below) can
     // run before the button has real layout -- e.g. it's momentarily
     // inside a panel whose width itself is still being synced to the
@@ -1906,11 +2098,13 @@ function buildMultiSelectDropdown(options, initialSelected, onChange, { onCreate
 
     renderSummary();
     renderPanel();
-    root.append(summaryBtn, categoryToolbar, panel);
+    const fieldWrap = el("div", "pc-multiselect-field-wrap");
+    fieldWrap.append(summaryBtn, panel);
+    root.append(fieldWrap, addCategoryBtn, categoryToolbar);
     return root;
 }
 
-export function renderLibraryEditPanel(rightPanel, existingEntry, { library, onDone, onCancel, confirmDialog, fileToDataUrl }) {
+export function renderLibraryEditPanel(rightPanel, existingEntry, { library, onDone, onCancel, confirmDialog, fileToDataUrl, onCategoryRenamed }) {
     const panel = el("div", "pc-edit-panel");
     panel.append(el("div", "pc-panel-title", { text: existingEntry ? "Edit Prompt" : "New Prompt" }));
 
@@ -1945,7 +2139,7 @@ export function renderLibraryEditPanel(rightPanel, existingEntry, { library, onD
         const btn = uiBtn({
             bare: true,
             extra: "pc-entry-image-delete",
-            noStep: true, // absolute overlay (was a :not() exclusion pre-round 43)
+            noStep: true, // absolute overlay
             title: "Remove image",
             onClick: async (e) => {
                 e.stopPropagation();
@@ -2080,8 +2274,10 @@ export function renderLibraryEditPanel(rightPanel, existingEntry, { library, onD
 
     const nameRow = el("div", "pc-field-row");
     nameRow.append(el("label", null, { text: "Name" }));
+    const nameAutocompleteWrap = el("div", "pc-name-autocomplete-wrap");
     const nameInput = el("input", "pc-text-input", { type: "text" });
     nameInput.value = existingEntry ? existingEntry.name : "";
+    nameInput.autocomplete = "off";
     // Reflect the correction in the field itself when the person leaves
     // it, so what gets saved is visibly what was typed-and-fixed (e.g.
     // "Bright//Sun" -> "Bright Sun"). An untouched empty field stays
@@ -2091,7 +2287,75 @@ export function renderLibraryEditPanel(rightPanel, existingEntry, { library, onD
         if (!nameInput.value.trim()) return;
         nameInput.value = correctPromptName(nameInput.value);
     });
-    nameRow.append(nameInput);
+    nameAutocompleteWrap.append(nameInput);
+
+    // Name autocomplete: as the person types, show up to 3 existing
+    // library prompt names that alphabetically match, so they can see
+    // what's already out there before settling on a name (helps them
+    // reuse an existing name on purpose, or steer clear of a
+    // near-duplicate by accident). This is pure UI sugar over
+    // `library.entries`, which the panel already holds in memory --
+    // no server round-trip needed, unlike the exists-check below.
+    const nameSuggestList = el("div", "pc-name-autocomplete-list");
+    nameSuggestList.style.display = "none";
+    nameAutocompleteWrap.append(nameSuggestList);
+    nameRow.append(nameAutocompleteWrap);
+
+    function computeNameSuggestions(typed) {
+        const query = typed.trim().toLowerCase();
+        if (!query) return [];
+        const excludeRef = existingEntry ? existingEntry.prompt_ref : undefined;
+        const seen = new Set();
+        const matches = [];
+        for (const entry of library.entries || []) {
+            if (excludeRef && entry.prompt_ref === excludeRef) continue;
+            const entryName = entry.name || "";
+            const key = entryName.toLowerCase();
+            if (!key.includes(query) || seen.has(key)) continue;
+            seen.add(key);
+            matches.push(entryName);
+        }
+        // Alphabetical, so the three shown are a stable, predictable
+        // slice of "what's out there" rather than whatever order the
+        // scan happened to return.
+        matches.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+        return matches.slice(0, 3);
+    }
+
+    function hideNameSuggestions() {
+        nameSuggestList.style.display = "none";
+        nameSuggestList.innerHTML = "";
+    }
+
+    function renderNameSuggestions() {
+        const matches = computeNameSuggestions(nameInput.value);
+        if (!matches.length) {
+            hideNameSuggestions();
+            return;
+        }
+        nameSuggestList.innerHTML = "";
+        for (const matchName of matches) {
+            const item = el("div", "pc-name-autocomplete-item", { text: matchName });
+            // mousedown (not click) fires before the input's blur, so
+            // picking a suggestion doesn't race the blur handler's
+            // name-correction rewrite.
+            item.addEventListener("mousedown", (e) => {
+                e.preventDefault();
+                nameInput.value = matchName;
+                hideNameSuggestions();
+                nameInput.dispatchEvent(new Event("input"));
+                nameInput.focus();
+            });
+            nameSuggestList.append(item);
+        }
+        nameSuggestList.style.display = "block";
+    }
+
+    nameInput.addEventListener("focus", renderNameSuggestions);
+    nameInput.addEventListener("blur", () => {
+        // Let a pending suggestion mousedown register first.
+        setTimeout(hideNameSuggestions, 0);
+    });
 
     const textRow = el("div", "pc-field-row");
     textRow.append(el("label", null, { text: "Prompt text" }));
@@ -2101,10 +2365,14 @@ export function renderLibraryEditPanel(rightPanel, existingEntry, { library, onD
 
     // Category multi-select: closed-by-default dropdown showing a
     // summary, expanding into a checkbox list (incl. "None", which
-    // clears every other selection when selected) on click.
+    // clears every other selection when selected) on click. Folder
+    // categories (single-select, exclusive of each other, independent
+    // of "None") are shown in the same dropdown -- see
+    // buildMultiSelectDropdown's folderOptions/onFolderChange.
     const categoryRow = el("div", "pc-field-row");
     categoryRow.append(el("label", null, { text: "Category" }));
     let selectedCategories = new Set(existingEntry ? existingEntry.category : []);
+    let selectedFolder = existingEntry ? (existingEntry.folder || null) : null;
     const categoryDropdown = buildMultiSelectDropdown(
         library.getAllCategories(),
         Array.from(selectedCategories),
@@ -2113,9 +2381,28 @@ export function renderLibraryEditPanel(rightPanel, existingEntry, { library, onD
         },
         {
             onCreateCategory: (name) => library.createCategory(name),
-            onRenameCategory: (oldName, newName) => library.renameCategory(oldName, newName),
+            onRenameCategory: async (oldName, newName) => {
+                await library.renameCategory(oldName, newName);
+                // library.renameCategory already remaps its OWN
+                // this.selectedCategory (the library browser's filter)
+                // when it matches -- but a section's category filter
+                // lives outside the library controller entirely (see
+                // prompt_composer.js's sectionSelectedCategory), so
+                // nothing there would otherwise learn this name just
+                // changed. Without this, a section filtered to the
+                // renamed category keeps asking for the OLD name after
+                // every entry's own category has already moved to the
+                // new one -- an empty list until the person manually
+                // re-picks the filter.
+                onCategoryRenamed?.(oldName, newName);
+            },
             onDeleteCategory: (name) => library.deleteCategory(name),
             confirmDialog,
+            folderOptions: library.getFolderNames(),
+            initialSelectedFolder: selectedFolder,
+            onFolderChange: (updatedFolder) => {
+                selectedFolder = updatedFolder;
+            },
         }
     );
     categoryRow.append(categoryDropdown);
@@ -2123,6 +2410,40 @@ export function renderLibraryEditPanel(rightPanel, existingEntry, { library, onD
     const existsWarning = el("div", "pc-locked-note", { text: "" });
     existsWarning.style.display = "none";
     existsWarning.style.color = "#f5c2c2";
+
+    // Name-only heads-up: same slot/class as the blocking "already
+    // exists" note above, but the pale warn tone instead of red --
+    // purely informational, never disables Save/Done. Kept as a
+    // separate element so it can show alongside -- or independently
+    // of -- the blocking note without the two fighting over one
+    // textContent.
+    const nameWarning = el("div", "pc-locked-note pc-name-soft-warning", { text: "" });
+    nameWarning.style.display = "none";
+
+    function updateNameOnlyWarning() {
+        // The blocking exists-check (name+text) already covers this
+        // case with its own message; don't stack a second one on top.
+        if (existsWarning.style.display !== "none") {
+            nameWarning.style.display = "none";
+            return;
+        }
+        const typedName = correctPromptName(nameInput.value);
+        if (!nameInput.value.trim()) {
+            nameWarning.style.display = "none";
+            return;
+        }
+        const excludeRef = existingEntry ? existingEntry.prompt_ref : undefined;
+        const nameKey = typedName.toLowerCase();
+        const collision = (library.entries || []).some(
+            (entry) => (!excludeRef || entry.prompt_ref !== excludeRef) && (entry.name || "").toLowerCase() === nameKey
+        );
+        if (collision) {
+            nameWarning.textContent = `A prompt named "${typedName}" already exists.`;
+            nameWarning.style.display = "block";
+        } else {
+            nameWarning.style.display = "none";
+        }
+    }
 
     const actions = el("div", "pc-edit-actions");
     const saveBtn = uiBtn({ text: existingEntry ? "Done" : "Save", variant: "primary" });
@@ -2149,7 +2470,7 @@ export function renderLibraryEditPanel(rightPanel, existingEntry, { library, onD
 
     async function trySave() {
         // Raw input is corrected into the Prompt Name first
-        // (Naming_Correction_Rules.md section 2): invalid characters
+        // by the naming rules: invalid characters
         // become spaces, consecutive spaces merge, edges trim, and the
         // name starts with a word/number. The server re-applies the
         // same correction (idempotent); correcting here is what makes
@@ -2178,7 +2499,7 @@ export function renderLibraryEditPanel(rightPanel, existingEntry, { library, onD
         // The panel KNOWS, beyond any doubt, whether the user's session
         // moved the picture: any explicit add/replace/remove action (or
         // a clear to null) sets pendingImageDataUrl, which stays
-        // undefined only when the image was left alone. Round 30: this
+        // undefined only when the image was left alone. This
         // truth rides out to the caller, because the mounted library
         // card must be remade when the bytes changed no matter how any
         // version-bump bookkeeping downstream fares.
@@ -2188,6 +2509,16 @@ export function renderLibraryEditPanel(rightPanel, existingEntry, { library, onD
                 const fields = { name, prompt: promptText, category };
                 if (pendingImageDataUrl === null) fields.clearImage = true;
                 else if (pendingImageDataUrl) fields.imageDataUrl = pendingImageDataUrl;
+                // Only send `folder` when the panel's selection actually
+                // DIFFERS from where this prompt already lives -- an
+                // ordinary save that never touched the folder picker
+                // must not trigger a move (see api_client.updateLibraryEntry:
+                // omitting the field entirely is what tells the server
+                // "leave it wherever it is", vs. "" which is a real
+                // "move to the library root" instruction).
+                const currentFolder = existingEntry.folder || "";
+                const nextFolder = selectedFolder || "";
+                if (nextFolder !== currentFolder) fields.folder = nextFolder;
                 const updated = await library.update(existingEntry.prompt_ref, fields, { refresh: false });
                 wrappedOnDone({ entry: updated, imageChanged });
             } else {
@@ -2196,6 +2527,7 @@ export function renderLibraryEditPanel(rightPanel, existingEntry, { library, onD
                     prompt: promptText,
                     category,
                     imageDataUrl: pendingImageDataUrl || null,
+                    folder: selectedFolder || null,
                 });
                 wrappedOnDone({ entry: created, imageChanged });
             }
@@ -2224,12 +2556,17 @@ export function renderLibraryEditPanel(rightPanel, existingEntry, { library, onD
                 existsWarning.style.display = "none";
                 saveBtn.disabled = false;
             }
+            updateNameOnlyWarning();
         }, 300);
     };
-    nameInput.addEventListener("input", scheduleCheck);
+    nameInput.addEventListener("input", () => {
+        renderNameSuggestions();
+        updateNameOnlyWarning();
+        scheduleCheck();
+    });
     textArea.addEventListener("input", scheduleCheck);
     saveBtn.addEventListener("click", trySave);
 
-    panel.append(imagePreview, fileInput, nameRow, textRow, categoryRow, existsWarning, actions);
+    panel.append(imagePreview, fileInput, nameRow, textRow, categoryRow, existsWarning, nameWarning, actions);
     rightPanel.append(panel);
 }

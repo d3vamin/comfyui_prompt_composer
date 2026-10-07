@@ -7,7 +7,7 @@
  * this is the only file that needs updating.
  */
 
-import { api, API_BASE } from "./dom_utils.js";
+import { api, apiUrl } from "./dom_utils.js";
 
 /**
  * Thumbnail cache-busters, keyed PER PROMPT.
@@ -18,16 +18,16 @@ import { api, API_BASE } from "./dom_utils.js";
  * version bump is the SAME ref serving DIFFERENT pixels: replacing or
  * clearing a prompt's image while leaving its name and text alone.
  *
- * This used to be a single global counter bumped on every library refresh.
- * That meant starring one prompt rewrote the URL of EVERY thumbnail on
- * screen, throwing away the browser's cached copy of the whole library and
- * re-downloading and re-decoding all of them at once -- which is the flash
- * people saw when toggling a favorite. An unrelated edit now leaves every
- * other <img> on a URL the cache still answers instantly.
+ * A single global counter bumped on every library refresh would rewrite the
+ * URL of EVERY thumbnail on screen whenever one prompt is starred, throwing
+ * away the browser's cached copy of the whole library and re-downloading
+ * and re-decoding all of them at once -- a visible flash when toggling a
+ * favorite. Per-prompt versions leave every unrelated <img> on a URL the
+ * cache still answers instantly.
  *
- * Round 29 note: this map lives only in memory, so it cannot survive a
- * page reload -- and the reload case is exactly where a same-ref image
- * swap used to reappear stale (bare URL, hard-cached old pixels). The
+ * Note: this map lives only in memory, so it cannot survive a page
+ * reload -- and the reload case is exactly where a same-ref image swap
+ * could otherwise reappear stale (bare URL, hard-cached old pixels). The
  * other half of correctness therefore lives in routes.py's image handler:
  * a ?v-keyed URL may be cached hard (the version pins the bytes), a bare
  * URL must revalidate. Client bump for the live session, server policy
@@ -45,14 +45,14 @@ let libraryImageEpoch = 0;
  * epoch draws from the same sequence it is always greater than every
  * version already handed out, so a rescan is guaranteed to move all URLs.
  *
- * Round 30: it is SEEDED from wall-clock seconds rather than starting at
+ * It is SEEDED from the wall clock rather than starting at
  * 0 -- not for intra-session speed but for cross-session identity: the
  * ?v=N answers live in the browser cache for a day (immutable), while a
  * plain counter restarted every page load. Session #2's first image edit
  * would hand out exactly "?v=1" again -- the very URL session #1 had
  * already cached against the OLD pixels -- and the cache would answer it
- * instantly, so "the card doesn't update at the first time" was back via
- * the side door. Seeding past "now" makes every version this machine ever
+ * instantly, so a replaced image would fail to update on first view.
+ * Seeding past "now" makes every version this machine ever
  * issues strictly greater than anything an earlier session stored --
  * and MILLIsecond granularity, because a counter seeded per-second could
  * still hand a new page load (Ctrl+F5 inside the same second as the
@@ -130,7 +130,9 @@ function versionFor(promptRef) {
 
 export function libraryImageUrl(promptRef) {
     const version = versionFor(promptRef);
-    return `${API_BASE}/library/${encodeURIComponent(promptRef)}/image${version ? `?v=${version}` : ""}`;
+    // Through apiUrl(), so the <img> resolves under a non-root base path
+    // exactly as the fetch-based calls do.
+    return apiUrl(`/library/${encodeURIComponent(promptRef)}/image${version ? `?v=${version}` : ""}`);
 }
 
 /** Re-fetch ONE prompt's thumbnail (a NEW version URL, always greater
@@ -165,9 +167,11 @@ export function checkLibraryExists(name, prompt, excludePromptRef) {
 /**
  * Create a new prompt_data. `imageDataUrl` is a data: URL (from
  * fileToDataUrl or clipboard paste) or null/undefined for the default
- * 32x32 black thumbnail fallback.
+ * 32x32 black thumbnail fallback. `folder` is an existing library
+ * subfolder name (unprefixed, e.g. "Outfits") to create the prompt
+ * directly inside; omit/null for the library root.
  */
-export function createLibraryEntry({ name, prompt, category, imageDataUrl }) {
+export function createLibraryEntry({ name, prompt, category, imageDataUrl, folder }) {
     return api("/library", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -176,6 +180,7 @@ export function createLibraryEntry({ name, prompt, category, imageDataUrl }) {
             prompt,
             category: category || [],
             image_data_url: imageDataUrl || null,
+            folder: folder || null,
         }),
     });
 }
@@ -184,15 +189,19 @@ export function createLibraryEntry({ name, prompt, category, imageDataUrl }) {
  * Edit an existing prompt_data in place. Any of name/prompt/category/
  * imageDataUrl may be omitted (undefined) to leave that field
  * unchanged server-side. Pass clearImage: true to remove the image
- * (revert to the default black thumbnail).
+ * (revert to the default black thumbnail). Pass `folder` (a plain,
+ * unprefixed subfolder name, or "" for the library root) to MOVE the
+ * prompt there; omit it (undefined) to leave the prompt wherever it
+ * already lives.
  */
-export function updateLibraryEntry(promptRef, { name, prompt, category, imageDataUrl, clearImage }) {
+export function updateLibraryEntry(promptRef, { name, prompt, category, imageDataUrl, clearImage, folder }) {
     const body = {};
     if (name !== undefined) body.name = name;
     if (prompt !== undefined) body.prompt = prompt;
     if (category !== undefined) body.category = category;
     if (imageDataUrl !== undefined) body.image_data_url = imageDataUrl;
     if (clearImage !== undefined) body.clear_image = clearImage;
+    if (folder !== undefined) body.folder = folder;
 
     return api(`/library/${encodeURIComponent(promptRef)}`, {
         method: "PUT",
@@ -208,8 +217,13 @@ export function deleteLibraryEntry(promptRef) {
 // -- Category identity (sidecar index; distinct from setLibraryCategory
 // above, which only assigns/unassigns tags on one prompt_data) --------
 
-export function listCategories() {
-    return api("/categories");
+export function listCategories({ withFolders = false } = {}) {
+    // withFolders: also include one FOLDER-derived pseudo-category per
+    // library subfolder (see server/library_store.py's
+    // list_categories_with_folders) -- for the search toolbar's
+    // dropdown, never for the "edit prompt" panel's tag picker (which
+    // calls this with no arguments, i.e. the plain list).
+    return api(withFolders ? "/categories?with_folders=1" : "/categories");
 }
 
 export function createCategory(name) {
@@ -278,24 +292,37 @@ export function composePreview({ sections, seed, userPrompt, fallbackContents })
 }
 
 /**
- * Layer C3: the literal string this node EMITTED when queued prompt
+ * The literal string this node EMITTED when queued prompt
  * `promptId` executed (server stash -- see
  * prompt_composer_node.record_executed_output). Rejects like any api()
  * call on 404 ("never ran / history evicted / server restarted"), which
  * callers treat as the ordinary "no executed answer", NOT as an error.
  */
-export function getExecutedOutput(promptId, nodeId) {
-    return api(`/last_output/${encodeURIComponent(promptId)}/${encodeURIComponent(nodeId)}`);
+export function getExecutedOutput(promptId, nodeId, clientKey) {
+    // clientKey disambiguates node ids across browser tabs (ids restart
+    // at 1 in every workflow, so two tabs share addresses otherwise).
+    // The server falls back to the bare node id when it is absent.
+    const q = clientKey ? `?client_key=${encodeURIComponent(clientKey)}` : "";
+    return api(`/last_output/${encodeURIComponent(promptId)}/${encodeURIComponent(nodeId)}${q}`);
 }
 
 /**
- * Layer C3 diagnostics: {ok, recorded, entries[]} straight from the
+ * the executed-output diagnostics: {ok, recorded, entries[]} straight from the
  * server's executed-output stash (see server/routes.py c3_status).
  * Always 200, so it doubles as an endpoint-alive probe without
  * spraying a red 404 line through the console.
  */
-export function getC3Status() {
-    return api("/c3_status");
+export function getC3Status({ full = false } = {}) {
+    // Prompt BODIES are opt-in server-side: the poll only needs
+    // identity + timestamp to decide whether to adopt, and this route
+    // is unauthenticated, so the full text is requested deliberately by
+    // the one call that is about to use it.
+    return api(full ? "/c3_status?full=1" : "/c3_status");
+}
+
+/** The installed node version, straight from Python's __version__. */
+export function getVersion() {
+    return api("/version");
 }
 
 // -- Presets ---------------------------------------------------------------

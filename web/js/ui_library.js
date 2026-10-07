@@ -13,7 +13,7 @@
  *    "options" button -- no per-card delete, and no
  *    allow_random/entry_separator, those are Entry-only concepts)
  *  - search-as-you-type filtering (word-AND over name + category +
- *    prompt, relevance-ranked while a query is live -- round 34; see
+ *    prompt, relevance-ranked while a query is live; see
  *    library_search.js for the engine)
  *  - category filtering ("All" default; categories with no prompts are
  *    hidden -- except the selected one, which must keep showing even at
@@ -22,9 +22,9 @@
  *    "already exists" blocking dialog
  *  - delete a prompt_data (with confirm) -- from the edit panel, or in
  *    bulk via the toolbar's "Delete selected prompts": a card/row body
- *    click toggles its membership in that selection (round 55 retired
- *    the separate checkbox -- the body click already did the same job;
- *    section entry cards keep theirs, see the "Bulk-selection checkbox"
+ *    click toggles its membership in that selection (there is no
+ *    separate checkbox -- the body click does the same job; section
+ *    entry cards keep theirs, see the "Bulk-selection checkbox"
  *    note in the stylesheet).
  *
  * This module holds its own small piece of UI state (search text,
@@ -41,10 +41,12 @@ import { stampRowFacts } from "./library_sync.js";
 import { searchBlob, rankEntries } from "./library_search.js";
 import {
     isFavoriteEntry,
-    withoutFavorite,
     withFavorite,
     withFavoritePinned,
     buildFavoriteStar,
+    categoryBadgesFor,
+    categoryMembershipFor,
+    FOLDER_CATEGORY_PREFIX,
 } from "./favorites.js";
 
 export class LibraryController {
@@ -57,6 +59,17 @@ export class LibraryController {
     constructor({ onPick } = {}) {
         this.entries = [];
         this.categories = []; // category IDENTITY list, from the sidecar index -- see api_client.listCategories
+        // Same identity list PLUS one folder-derived pseudo-category per
+        // library subfolder (see api_client.listCategories({withFolders:
+        // true}) / server library_store.list_categories_with_folders).
+        // Kept as a SEPARATE field, refreshed alongside `categories`
+        // rather than folded into it, because the two lists serve
+        // different consumers with a real behavioral difference: the
+        // search toolbar's dropdown wants folders shown (getAllCategoriesWithFolders),
+        // the "edit prompt" panel's tag picker must NEVER offer a folder
+        // as something to individually tag a prompt into
+        // (getAllCategories stays folder-free for exactly that reason).
+        this.categoriesWithFolders = [];
         this.searchText = "";
         this.selectedCategory = "All";
         // Star filter modifier, shown as the star button beside the
@@ -126,7 +139,10 @@ export class LibraryController {
             throw err;
         }
         publish();
-        this.categories = await apiClient.listCategories();
+        [this.categories, this.categoriesWithFolders] = await Promise.all([
+            apiClient.listCategories(),
+            apiClient.listCategories({ withFolders: true }),
+        ]);
         // No thumbnail invalidation here on purpose. A refresh re-reads the
         // LIST; it says nothing about a picture's bytes changing, and
         // bumping every image URL on each one is what made the whole grid
@@ -159,6 +175,47 @@ export class LibraryController {
     }
 
     /**
+     * getAllCategories()'s result, with every folder-derived pseudo-
+     * category (see this.categoriesWithFolders) appended after it. For
+     * the search toolbar's category dropdown ONLY -- see the field's
+     * own comment in the constructor for why the edit panel must keep
+     * using getAllCategories() instead.
+     *
+     * withFavoritePinned() is applied to the REAL categories only
+     * (categoriesWithFolders already carries them in the exact
+     * server-returned order -- real-then-folders -- so re-sorting the
+     * combined list here would risk shuffling a folder pseudo-category
+     * ahead of "Favorite" depending on name).
+     */
+    getAllCategoriesWithFolders() {
+        const pinnedReal = withFavoritePinned(this.categories);
+        const folderOnly = this.categoriesWithFolders
+            .filter((c) => !this.categories.includes(c))
+            .sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+        // Folders FIRST, alphabetically, then every real category
+        // (Favorite still pinned ahead of the rest of those):
+        // folder-derived categories lead the dropdown rather
+        // than trailing it, so "where does this live" is the first
+        // thing offered, ahead of "what else is it tagged".
+        return [...folderOnly, ...pinnedReal];
+    }
+
+    /**
+     * Plain (unprefixed) folder-category names currently on disk, e.g.
+     * ["Characters", "Outfits"] -- for the edit panel's folder picker,
+     * which needs to work with actual on-disk folder names (to send as
+     * `folder` on save; see LibraryController.update/create) rather
+     * than their "📁 " display form. Alphabetical -- same comparator
+     * getAllCategoriesWithFolders() already uses for folderOnly.
+     */
+    getFolderNames() {
+        return this.categoriesWithFolders
+            .filter((c) => c.startsWith(FOLDER_CATEGORY_PREFIX))
+            .map((c) => c.slice(FOLDER_CATEGORY_PREFIX.length))
+            .sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+    }
+
+    /**
      * Counts over the STRUCTURAL set -- every prompt that would be
      * listed right now if the search box were empty -- ignoring the
      * search text entirely.
@@ -170,12 +227,12 @@ export class LibraryController {
      * still there and still selected, exactly as it was before the
      * search, and the counts are meant to say so.
      *
-     * That was the bug -- with search in the loop, a search with no
-     * hits drove the selected category's count to 0, the zero-count
-     * option was dropped, the dropdown could no longer display the
-     * filter it was still applying, and it fell back to "All" while the
-     * list stayed put. Clearing the search left the filter and the
-     * label disagreeing with each other.
+     * Counting only the searched subset would be wrong: a search with no
+     * hits would drive the selected category's count to 0, the zero-count
+     * option would be dropped, the dropdown could no longer display the
+     * filter it was still applying, and it would fall back to "All" while
+     * the list stayed put. Clearing the search would then leave the filter
+     * and the label disagreeing with each other.
      *
      * @param {Array} entries  the full scanned list, not a filtered one
      * @param {Array} categories  the known category names
@@ -184,6 +241,16 @@ export class LibraryController {
         const counts = {};
         for (const cat of categories || []) counts[cat] = 0;
         for (const entry of entries || []) {
+            // A folder-derived pseudo-category (see
+            // FOLDER_CATEGORY_PREFIX / folder_pseudo_category_name
+            // server-side) is never in entry.category -- it is
+            // deliberately NOT an embedded tag, only a reflection of
+            // entry.folder -- so it needs its own count path rather
+            // than falling out of the loop below.
+            if (entry.folder) {
+                const folderCat = FOLDER_CATEGORY_PREFIX + entry.folder;
+                if (folderCat in counts) counts[folderCat] += 1;
+            }
             for (const cat of entry.category || []) {
                 if (cat in counts) counts[cat] += 1;
             }
@@ -191,13 +258,22 @@ export class LibraryController {
         return counts;
     }
 
-    /** Category counts over the whole library -- see countCategories. */
+    /** Category counts over the whole library -- see countCategories.
+     * Uses getAllCategories() (folder-free): the plain per-tag counts
+     * the "edit prompt" panel and any other non-toolbar consumer need. */
     getCategoryCounts() {
         return LibraryController.countCategories(this.entries, this.getAllCategories());
     }
 
+    /** Same as getCategoryCounts(), but over getAllCategoriesWithFolders()
+     * -- for the search toolbar's dropdown, so a folder pseudo-category
+     * shows a real, non-zero count instead of always reading (0). */
+    getCategoryCountsWithFolders() {
+        return LibraryController.countCategories(this.entries, this.getAllCategoriesWithFolders());
+    }
+
     _searchFiltered(entries) {
-        // Same word-AND engine the DOM pass ranks with (round 34) --
+        // Same word-AND engine the DOM pass ranks with --
         // one matcher for both, so the entry-level and DOM-level
         // answers can never disagree.
         const matched = rankEntries(entries, this.searchText).matched;
@@ -210,7 +286,18 @@ export class LibraryController {
     getStructuralEntries() {
         let list = this.entries;
         if (this.selectedCategory !== "All") {
-            list = list.filter((e) => (e.category || []).includes(this.selectedCategory));
+            if (this.selectedCategory.startsWith(FOLDER_CATEGORY_PREFIX)) {
+                // A folder-derived pseudo-category was picked: match by
+                // entry.folder, not entry.category -- a folder is
+                // deliberately never an embedded tag (see
+                // FOLDER_CATEGORY_PREFIX's own comment), so the normal
+                // tag-membership check below would always find zero
+                // entries for one of these.
+                const folder = this.selectedCategory.slice(FOLDER_CATEGORY_PREFIX.length);
+                list = list.filter((e) => e.folder === folder);
+            } else {
+                list = list.filter((e) => (e.category || []).includes(this.selectedCategory));
+            }
         }
         // Applied after the category filter, so the two intersect: the
         // star narrows whatever category is showing rather than
@@ -225,9 +312,9 @@ export class LibraryController {
      * What is actually on screen right now: the built set minus whatever
      * the search text is currently hiding.
      *
-     * The split matters. The grid used to be built with the text already
-     * applied, which meant prompts the text rejected never entered the DOM
-     * at all -- so shortening the query, or clearing it, had nothing left
+     * The split matters. Building the grid with the text already applied
+     * would mean prompts the text rejected never enter the DOM at all --
+     * so shortening the query, or clearing it, had nothing left
      * to reveal and the list could not widen back out. Keeping the DOM
      * text-independent makes every text change, in either direction, a
      * pure show/hide pass (see ComposerUI.filterLibraryEntries), and leaves
@@ -284,22 +371,27 @@ export class LibraryController {
         await this.refresh();
     }
 
-    async create({ name, prompt, category, imageDataUrl }) {
+    async create({ name, prompt, category, imageDataUrl, folder }) {
         // The server's answer is the complete, authoritative entry --
         // including whatever final filename its collision/UID rules
         // settled on -- so a create adopts it locally like any other
-        // single-prompt write. (This used to refresh() the whole scan,
-        // which is what made "Add prompt" pause on the way back.)
-        const entry = await apiClient.createLibraryEntry({ name, prompt, category, imageDataUrl });
+        // single-prompt write. (Refreshing the whole scan here would
+        // make "Add prompt" pause on the way back.)
+        const entry = await apiClient.createLibraryEntry({ name, prompt, category, imageDataUrl, folder });
         this._adoptEntry(null, entry);
-        if (category) this.categories = await apiClient.listCategories();
+        if (category) {
+            [this.categories, this.categoriesWithFolders] = await Promise.all([
+                apiClient.listCategories(),
+                apiClient.listCategories({ withFolders: true }),
+            ]);
+        }
         return entry;
     }
 
     async remove(promptRef) {
         await apiClient.deleteLibraryEntry(promptRef);
         // Local drop, no rescan: bulk delete loops this, and a scan per
-        // deleted file used to make deleting ten prompts ten full
+        // deleted file would make deleting ten prompts ten full
         // library walks. Orphaned index categories are invisible to the
         // UI anyway (the dropdown filters by per-entry counts) and the
         // next genuine refresh tidies them.
@@ -308,7 +400,7 @@ export class LibraryController {
 
     async update(promptRef, fields, { refresh = true } = {}) {
         const entry = await apiClient.updateLibraryEntry(promptRef, fields);
-        // Round 30: bump THIS prompt's thumbnail on EVERY single-prompt
+        // Bump THIS prompt's thumbnail on EVERY single-prompt
         // save, whatever the fields were. The old condition bumped only
         // when the payload carried an image change -- and when that
         // condition was ever wrong (a write that moved image bytes the
@@ -320,7 +412,7 @@ export class LibraryController {
         // per-ref bumping cannot reproduce it. (toggleFavorite stays a
         // separate, bump-free path -- a star truly never moves pixels.)
         apiClient.invalidateLibraryImage(entry?.prompt_ref || promptRef);
-        // The rescan used to be unconditional, and it is what made
+        // The rescan is conditional because an unconditional one makes
         // returning from the edit panel lag: one edited file dirties the
         // server's scan signature, so the "refresh" re-walks (and
         // re-reads what it can't reuse from) EVERY prompt, then the whole
@@ -337,7 +429,10 @@ export class LibraryController {
             // the dropdown reads this.categories, so fetch the index --
             // one sidecar read, not the per-file walk a rescan is.
             if (fields && fields.category !== undefined) {
-                this.categories = await apiClient.listCategories();
+                [this.categories, this.categoriesWithFolders] = await Promise.all([
+                    apiClient.listCategories(),
+                    apiClient.listCategories({ withFolders: true }),
+                ]);
             }
         }
         return entry;
@@ -374,7 +469,7 @@ export class LibraryController {
      * so the panel layer can focus it from anywhere and update the
      * "N of M" readout without hunting selectors. */
     buildSearchToolbar(onChange, onInput, onFlush) {
-        // Round 39: the strip's DOM + grammar (typing, Enter, Esc-clear,
+        // The strip's DOM + grammar (typing, Enter, Esc-clear,
         // cross) live in ui_chrome.buildSearchBox -- identical to the
         // section panel's copy that grew into a byte-twin. This wrapper
         // owns only controller-side bookkeeping: the searchText mirror
@@ -396,7 +491,7 @@ export class LibraryController {
 
     /**
      * Build one library card: thumbnail, name, and a single options
-     * button (per spec -- no allow_random / entry_separator, those belong
+     * button (no allow_random / entry_separator, those belong
      * to Entry, not prompt_data; and no per-card delete, which is handled
      * by the edit panel and the toolbar's bulk delete).
      *
@@ -411,7 +506,7 @@ export class LibraryController {
         card.draggable = true;
         card.dataset.promptRef = entry.prompt_ref;
         card.dataset.searchText = searchBlob(entry);
-        card.dataset.categories = JSON.stringify(entry.category || []);
+        card.dataset.categories = JSON.stringify(categoryMembershipFor(entry));
         stampRowFacts(card.dataset, entry);
         // The exact image URL the row rendered -- see stampRowFacts:
         // an image REPLACEMENT on an unchanged prompt moves neither the
@@ -440,7 +535,7 @@ export class LibraryController {
         // seat: it floats over the overlay badge row's right end (see
         // .pc-fav-star-grid), so showing the Favorite pill here too
         // would print the same fact twice in the same row.
-        imageWrap.append(buildThumbnailOverlay(entry.prompt, withoutFavorite(entry.category)));
+        imageWrap.append(buildThumbnailOverlay(entry.prompt, categoryBadgesFor(entry)));
         imageWrap.append(buildFavoriteStar({
             favorite: isFavoriteEntry(entry),
             placement: "grid",
@@ -449,7 +544,7 @@ export class LibraryController {
 
         const label = el("div", "pc-entry-label", { text: entry.name });
 
-        const optionsBtn = uiBtn({ bare: true, extra: "pc-entry-options-btn", noStep: true, icon: "edit", size: 12, title: "Edit prompt", onClick: (e) => {
+        const optionsBtn = uiBtn({ bare: true, extra: "pc-entry-options-btn", noStep: true, icon: "edit", size: 16, title: "Edit prompt", onClick: (e) => {
             e.stopPropagation();
             onOptions(entry);
         } });
@@ -459,9 +554,9 @@ export class LibraryController {
         // While picking a replacement for a missing entry, every card is
         // a single "use this one" choice -- a small "Use this" badge
         // labels the whole card as that click target. The bulk-select
-        // checkbox this badge used to replace is retired (round 55):
-        // the card body already toggles selection (click handler below),
-        // so the box was a redundant second affordance for the same set.
+        // There is no bulk-select checkbox here: the card body already
+        // toggles selection (click handler below), so a box would be a
+        // redundant second affordance for the same set.
         if (pickMode) {
             card.append(el("div", "pc-library-pick-badge", { text: "Use this" }));
         }
@@ -491,7 +586,7 @@ export class LibraryController {
         row.draggable = true;
         row.dataset.promptRef = entry.prompt_ref;
         row.dataset.searchText = searchBlob(entry);
-        row.dataset.categories = JSON.stringify(entry.category || []);
+        row.dataset.categories = JSON.stringify(categoryMembershipFor(entry));
         stampRowFacts(row.dataset, entry);
         row.dataset.fImg = entry.has_thumbnail === false ? "none" : apiClient.libraryImageUrl(entry.prompt_ref);
 
@@ -507,7 +602,7 @@ export class LibraryController {
             }));
         }
 
-        const optionsBtn = uiBtn({ bare: true, extra: "pc-entry-options-btn pc-entry-row-options-overlay", noStep: true, icon: "edit", size: 12, title: "Edit prompt", onClick: (e) => {
+        const optionsBtn = uiBtn({ bare: true, extra: "pc-entry-options-btn pc-entry-row-options-overlay", noStep: true, icon: "edit", size: 16, title: "Edit prompt", onClick: (e) => {
             e.stopPropagation();
             onOptions(entry);
         } });
@@ -523,10 +618,10 @@ export class LibraryController {
         // state must exist to be revealed (row hover shows it, per the
         // CSS reveal rule). Off it is display:none -- an ABSENT seat --
         // so revealing it on hover pushes the pills right by exactly the
-        // 14px+gap badge_fit has been reserving all along (round 58:
+        // 14px+gap badge_fit has been reserving all along (
         // the push is the behavior the user wants; the plan is fitted
         // against the star-present state, so it never overflows).
-        const badgeRow = buildOverflowBadgeRow(withoutFavorite(entry.category), "pc-library-card-badges");
+        const badgeRow = buildOverflowBadgeRow(categoryBadgesFor(entry), "pc-library-card-badges");
         badgeRow.prepend(buildFavoriteStar({
             favorite: isFavoriteEntry(entry),
             placement: "list",
@@ -536,8 +631,8 @@ export class LibraryController {
 
         const actions = el("div", "pc-entry-row-actions");
         // See buildCard's identical rationale: the "Use this" badge
-        // labels single-pick rows; the retired checkbox left browse-mode
-        // actions empty (the row body carries the selection click).
+        // labels single-pick rows; browse-mode actions stay empty
+        // (the row body carries the selection click).
         if (pickMode) {
             actions.append(el("div", "pc-library-pick-badge", { text: "Use this" }));
         }

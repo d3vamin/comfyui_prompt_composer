@@ -1,6 +1,6 @@
 /**
- * thumb_preview.js — the full-resolution hover tooltip (round 20;
- * list-view rows + 2 s dwell in 20b; scroll-retarget re-arm in 29).
+ * thumb_preview.js — the full-resolution hover tooltip (list-view rows,
+ * 2 s dwell, scroll-retarget re-arm).
  *
  * Hovering an entry/prompt thumbnail -- the grid card's
  * .pc-entry-image-wrap OR the list row's .pc-entry-row-thumb, sections
@@ -29,7 +29,7 @@
  * NOT reset by pointer motion inside the same thumb: "hover for 2s" means
  * 2s on the card, not 2s of stillness.
  *
- * Scroll retargeting (round 29): scrolling moves content UNDER a still
+ * Scroll retargeting: scrolling moves content UNDER a still
  * pointer, and browsers do not reliably announce that as a hover --
  * Firefox never synthesizes mouseover for it, Chrome only after the
  * scroll settles (after our own dismiss has already run). So every
@@ -48,9 +48,9 @@
  * the tests can run this under a fake DOM with a shortened delay.
  */
 
-export const THUMB_PREVIEW_DELAY_MS = 2000;
+export const THUMB_PREVIEW_DELAY_MS = 700;
 // How long the pointer must sit still after wheel/scroll motion before
-// the settle re-check looks at what arrived under it (round 29).
+// the settle re-check looks at what arrived under it.
 export const THUMB_RECHECK_MS = 150;
 // Grid card wrap + list row thumb -- the two thumbnail hosts.
 const THUMB_SELECTOR = ".pc-entry-image-wrap, .pc-entry-row-thumb";
@@ -69,7 +69,7 @@ export function attachThumbPreview(root, {
 
     let wrap = null;            // wrap currently under the pointer
     let timer = null;           // pending show timer
-    let recheckTimer = null;    // pending settle re-check (round 29)
+    let recheckTimer = null;    // pending settle re-check
     let tip = null;             // the floating element (lazy singleton)
     let tipImg = null;
     let lastX = 0;
@@ -185,7 +185,7 @@ export function attachThumbPreview(root, {
     }
 
     /**
-     * Round 29: scrolling slides content under a STILL pointer, which is
+     * Scrolling slides content under a STILL pointer, which is
      * a brand-new hover the browser may never announce (Firefox
      * synthesizes no mouseover for it; Chrome fires only after the
      * scroll settles -- after our dismiss already ran). So each

@@ -8,10 +8,9 @@ writes, scans, or resolves those files. Every other module (the compose
 node, the JS preview via its resolve endpoint, the library CRUD routes)
 goes through the functions here rather than touching PNG metadata
 directly, so there is exactly one implementation of "what does this
-prompt_data actually contain" — see the "Resolution" design note in
-comfyUI_Prompt_composer.md for why that single-source-of-truth property
-matters (Approach B: Python resolves prompt_ref at compose/preview time,
-rather than JS freezing resolved text at edit time).
+prompt_data actually contain". That single source of truth matters
+because Python resolves prompt_ref at compose/preview time, rather than
+JS freezing resolved text at edit time.
 
 Filename convention
 --------------------
@@ -113,7 +112,7 @@ skipped -- no error, no warning surfaced to the user.
 
 Naming
 ------
-Two names exist for every prompt (see Naming_Correction_Rules.md): the
+Two names exist for every prompt: the
 human-readable Prompt Name shown in the UI, and the encoded name portion
 of the prompt_data filename. They are related by an exact, reversible
 encoding -- they are NOT the same string.
@@ -218,14 +217,17 @@ must be blocked; the existing entry should be used instead.
 Collision protection (a trailing "_002"-style number appended to the
 display name -- reusing a trailing "_" -- with the UID regenerated from
 the suffixed name) applies to IMPORTS only -- see "Filename convention"
-above and Naming_Correction_Rules.md section 4.
+above.
 """
 
 import hashlib
 import io
 import json
+import logging
 import os
 import re
+import shutil
+import threading
 import time
 import unicodedata
 import uuid as uuid_lib
@@ -234,15 +236,49 @@ from PIL import Image, PngImagePlugin
 
 try:
     from . import image_utils
+    from . import paths
+    from .errors import AlreadyExistsError
 except ImportError:  # pragma: no cover - allows standalone import during tests
     import image_utils
+    import paths
+    from errors import AlreadyExistsError
 
 
 NODE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LIBRARY_DIR = os.path.join(NODE_DIR, "library")
-CATEGORIES_INDEX_PATH = os.path.join(LIBRARY_DIR, "_categories.json")
 
-os.makedirs(LIBRARY_DIR, exist_ok=True)
+log = logging.getLogger("prompt_composer")
+
+# Sentinel for update_prompt_data's `folder` parameter: distinguishes
+# "caller didn't mention folder at all -- leave it wherever it is" from
+# "caller explicitly wants it at the library root" (folder=""). A plain
+# default of None can't carry that distinction since "" and None would
+# otherwise mean the same thing.
+_UNSET = object()
+
+
+def _lib_dir() -> str:
+    """The library folder (see server/paths.py). Resolved lazily -- this
+    module has NO import-time filesystem side effects, so importing it
+    (tests, tooling, a docs build) never creates directories."""
+    return paths.library_dir()
+
+
+def _categories_index_path() -> str:
+    return os.path.join(_lib_dir(), "_categories.json")
+
+
+def _trash_dir() -> str:
+    """Where a superseded prompt_data file is moved instead of being
+    deleted outright (see scan_library's duplicate rule)."""
+    return os.path.join(_lib_dir(), "_trash")
+
+
+# The scan mutates the folder (renames, ingests, retires duplicates), so
+# two concurrent scans could interleave the collision ladder and hand out
+# duplicate "_002" names. One lock makes the whole pass atomic; it also
+# guards the module-level read/memo caches those passes share between the
+# aiohttp event loop and ComfyUI's execution worker thread.
+_SCAN_LOCK = threading.RLock()
 
 USER_PROMPT_NODE_TITLE = "user_prompt"
 
@@ -290,8 +326,8 @@ UID_RE = re.compile(r"^(.*?)_(\d{8})$")
 _INVALID_FILENAME_CHARS_RE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 
 # Fallback for a name whose corrected form would otherwise be empty
-# (Naming_Correction_Rules.md section 5: "the system must not create an
-# empty Prompt Name"; the exact fallback is the implementation's call).
+# (the system must never create an empty Prompt Name; the exact
+# fallback is the implementation's call).
 PROMPT_NAME_FALLBACK = "Prompt"
 
 _MAX_PROMPT_NAME_CHARS = 128
@@ -347,7 +383,7 @@ def generate_uid(name: str, prompt: str) -> str:
     """Deterministic 8-digit UID from name + prompt text.
 
     The name is case-folded first: names that differ only by case are
-    the same name (Naming_Correction_Rules.md rule 1.7), so "Bright Sun"
+    the same name, so "Bright Sun"
     and "bright sun" must hash to the same UID for the same prompt --
     that is what lets the "already exists" check treat them as one.
     Both parts are canonicalized (NFC, LF newlines, trimmed) so the
@@ -371,8 +407,7 @@ def generate_uid(name: str, prompt: str) -> str:
 
 
 def _finalize_prompt_name(text: str) -> str:
-    """Shared tail of every name correction (Naming_Correction_Rules.md
-    sections 1 and 5): invalid filename characters become spaces, runs
+    """Shared tail of every name correction: invalid filename characters become spaces, runs
     of whitespace collapse to a single space, leading/trailing spaces
     are trimmed, any space immediately before or after a literal "_" is
     removed (rule 8 -- it makes the per-character encoding injective),
@@ -413,7 +448,7 @@ def correct_prompt_name(raw: str, fallback: str = PROMPT_NAME_FALLBACK) -> str:
 def encode_prompt_name(name: str) -> str:
     """Prompt Name -> the name portion of a prompt_data filename.
 
-    Per-character escaping (Naming_Correction_Rules.md section 2 prose):
+    Per-character escaping:
     every literal "_" doubles to "__", and every space becomes a single
     "_". Underscores are doubled FIRST so the "_" produced from a space
     is never mistaken for part of an escaped underscore. So "Bright Sun"
@@ -495,8 +530,7 @@ def normalize_imported_stem(stem: str) -> str:
 
 
 def collision_suffix(n: int) -> str:
-    """The raw unified trailing-number suffix (Naming_Correction_Rules.md
-    section 4): "_" + number, at least three digits, width growing
+    """The raw unified trailing-number suffix: "_" + number, at least three digits, width growing
     naturally past 999. Mirror of collisionSuffix() in web/js/naming.js.
     Prefer apply_collision_suffix() to attach it to a name (it handles a
     trailing "_"); this is just the suffix itself.
@@ -551,9 +585,9 @@ def to_client_entry(entry: dict | None) -> dict | None:
 
 
 def _resolve_within_library(filename: str) -> str:
-    """Resolve `filename` under LIBRARY_DIR, refusing path traversal."""
-    candidate = os.path.normpath(os.path.join(LIBRARY_DIR, filename))
-    base = os.path.normpath(LIBRARY_DIR)
+    """Resolve `filename` under _lib_dir(), refusing path traversal."""
+    candidate = os.path.normpath(os.path.join(_lib_dir(), filename))
+    base = os.path.normpath(_lib_dir())
     if candidate != base and not candidate.startswith(base + os.sep):
         raise ValueError("Invalid path")
     return candidate
@@ -830,13 +864,12 @@ def read_prompt_data(path: str) -> dict | None:
 # ---------------------------------------------------------------------------
 # scan_library() pass 1 fully parses EVERY candidate file (a PIL decode +
 # text-chunk walk per PNG), and it re-runs on every library refresh --
-# which the client does after every edit, star toggle, and create. That
-# made repeated refreshes O(entire library) on the CPU for no reason:
-# unchanged files parse to identical data. This cache keys each parsed
-# result on (size, mtime_ns) -- the same transparent-cache idea the
-# resolve() docstring reserved for a "Phase 8" profiling pass -- so a
-# steady-state scan only stats files, and only files that actually
-# changed (or entered the folder) get decoded again.
+# which the client does after every edit, star toggle, and create. Without
+# a cache, repeated refreshes would cost O(entire library) on the CPU for
+# no reason: unchanged files parse to identical data. This cache keys each
+# parsed result on (size, mtime_ns), so a steady-state scan only stats
+# files, and only files that actually changed (or entered the folder) get
+# decoded again.
 #
 # Correctness notes:
 #  - Every write path in this module goes through _write_prompt_data_*
@@ -872,7 +905,8 @@ def _drop_prompt_read(path: str) -> None:
     """Remove `path` from the read cache. Called by every write/rename/
     delete site in this module so a just-written file is always parsed
     fresh, regardless of filesystem mtime granularity."""
-    _PROMPT_READ_CACHE.pop(path, None)
+    with _SCAN_LOCK:
+        _PROMPT_READ_CACHE.pop(path, None)
 
 
 def read_prompt_data_cached(path: str) -> dict | None:
@@ -888,14 +922,31 @@ def read_prompt_data_cached(path: str) -> dict | None:
         _drop_prompt_read(path)
         return read_prompt_data(path)
     sig = (st.st_size, st.st_mtime_ns)
-    hit = _PROMPT_READ_CACHE.get(path)
-    if hit is not None and hit[0] == sig:
-        return _copy_prompt_data(hit[1])
+    # _SCAN_LOCK (re-entrant) also guards this map: it is read and
+    # written from BOTH the aiohttp event loop and ComfyUI's execution
+    # worker thread (compose -> resolve -> here), and scan_library holds
+    # the same lock while mutating the very files it caches.
+    with _SCAN_LOCK:
+        hit = _PROMPT_READ_CACHE.get(path)
+        if hit is not None and hit[0] == sig:
+            return _copy_prompt_data(hit[1])
     data = read_prompt_data(path)
-    if len(_PROMPT_READ_CACHE) >= _PROMPT_READ_CACHE_MAX:
-        _PROMPT_READ_CACHE.clear()
-    _PROMPT_READ_CACHE[path] = (sig, _copy_prompt_data(data))
+    with _SCAN_LOCK:
+        if len(_PROMPT_READ_CACHE) >= _PROMPT_READ_CACHE_MAX:
+            _PROMPT_READ_CACHE.clear()
+        _PROMPT_READ_CACHE[path] = (sig, _copy_prompt_data(data))
     return _copy_prompt_data(data)
+
+
+def _remove_quietly(path: str) -> None:
+    """Delete `path` if it is still there, swallowing every error. Used
+    to clean up the temp file of an atomic write -- on the success path
+    os.replace() already consumed it, so "not found" is the normal
+    case."""
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 def _write_prompt_data_txt(path: str, prompt: str, category: list | None = None) -> None:
@@ -914,9 +965,15 @@ def _write_prompt_data_txt(path: str, prompt: str, category: list | None = None)
         content = prompt
 
     tmp_path = path + f".tmp-{uuid_lib.uuid4().hex}"
-    with open(tmp_path, "w", encoding="utf-8", newline="\n") as f:
-        f.write(content)
-    os.replace(tmp_path, path)
+    try:
+        with open(tmp_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(content)
+        os.replace(tmp_path, path)
+    finally:
+        # A failed write must not leave a stray .tmp-<hex> behind. (The
+        # scan ignores them, so they were invisible litter that only
+        # ever grew.) os.replace() already consumed the temp on success.
+        _remove_quietly(tmp_path)
     _drop_prompt_read(path)
 
 
@@ -945,9 +1002,129 @@ def _write_prompt_data_png(path: str, base_image_bytes: bytes, workflow_json: di
         png_info.add_text(PC_CATEGORIES_KEY, json.dumps(list(category), ensure_ascii=False))
 
     tmp_path = path + f".tmp-{uuid_lib.uuid4().hex}"
-    img.save(tmp_path, format="PNG", pnginfo=png_info, optimize=True)
-    os.replace(tmp_path, path)
+    try:
+        img.save(tmp_path, format="PNG", pnginfo=png_info, optimize=True)
+        os.replace(tmp_path, path)
+    finally:
+        _remove_quietly(tmp_path)
     _drop_prompt_read(path)
+
+
+# ---------------------------------------------------------------------------
+# Metadata-only rewrite (no pixel re-encode)
+# ---------------------------------------------------------------------------
+# Changing a prompt's CATEGORY TAGS deliberately does not go through
+# update_prompt_data(), which re-reads the PNG, re-sanitizes it, crops,
+# resizes and re-encodes the whole image just to change one text chunk.
+# For a category rename across a few hundred prompts that would be hundreds
+# of full PNG encodes; for the favourite star it would be one per click.
+#
+# A PNG is a chunk stream, so the tags can be swapped by rewriting the
+# bytes directly: copy every chunk through, drop the old pc_categories
+# tEXt, and splice a new one in before IEND. Pixel data (IDAT) is never
+# touched, never decoded and never re-compressed. The .txt shape gets the
+# same treatment through its one-line `#pc_meta` front matter.
+
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+def _png_iter_chunks(raw: bytes):
+    """Yield (chunk_type, full_chunk_bytes) for a PNG byte string.
+    Raises ValueError if the stream is not a well-formed PNG."""
+    if not raw.startswith(_PNG_SIGNATURE):
+        raise ValueError("Not a PNG")
+    pos = len(_PNG_SIGNATURE)
+    total = len(raw)
+    while pos + 8 <= total:
+        length = int.from_bytes(raw[pos:pos + 4], "big")
+        ctype = raw[pos + 4:pos + 8]
+        end = pos + 12 + length  # length + type + data + crc
+        if end > total:
+            raise ValueError("Truncated PNG chunk")
+        yield ctype, raw[pos:end]
+        pos = end
+        if ctype == b"IEND":
+            return
+    raise ValueError("PNG ended without IEND")
+
+
+def _png_text_chunk(key: str, value: str) -> bytes:
+    """Build one uncompressed tEXt chunk (Latin-1 keyword + payload).
+    Falls back to iTXt when the value is not Latin-1 encodable, which is
+    what Pillow does and what any reader (including Pillow) expects."""
+    key_bytes = key.encode("latin-1")
+    try:
+        body = key_bytes + b"\x00" + value.encode("latin-1")
+        ctype = b"tEXt"
+    except UnicodeEncodeError:
+        # iTXt: keyword \0 compression_flag compression_method \0 lang \0 translated \0 text
+        body = key_bytes + b"\x00\x00\x00\x00\x00" + value.encode("utf-8")
+        ctype = b"iTXt"
+    import zlib
+    crc = zlib.crc32(ctype + body) & 0xFFFFFFFF
+    return (len(body).to_bytes(4, "big") + ctype + body + crc.to_bytes(4, "big"))
+
+
+def _png_with_categories(raw: bytes, category: list | None) -> bytes:
+    """Return `raw` with its pc_categories tEXt/iTXt chunk replaced by
+    `category` (or removed when the list is empty). Pixel chunks are
+    copied through byte-for-byte."""
+    wanted = json.dumps(list(category), ensure_ascii=False) if category else None
+    key_prefix = PC_CATEGORIES_KEY.encode("latin-1") + b"\x00"
+    out = bytearray(_PNG_SIGNATURE)
+    for ctype, chunk in _png_iter_chunks(raw):
+        if ctype in (b"tEXt", b"iTXt", b"zTXt") and chunk[8:].startswith(key_prefix):
+            continue  # the old tag list -- dropped; a new one is spliced in below
+        if ctype == b"IEND":
+            if wanted is not None:
+                out += _png_text_chunk(PC_CATEGORIES_KEY, wanted)
+            out += chunk
+            break
+        out += chunk
+    return bytes(out)
+
+
+def _rewrite_embedded_categories(filename: str, category: list | None) -> bool:
+    """Replace ONLY the embedded category tags of an existing
+    prompt_data file, leaving its name, prompt text and (for a PNG) its
+    exact pixel bytes untouched. Returns True on success, False when the
+    file could not be rewritten this way -- the caller then falls back to
+    the full update_prompt_data() path.
+    """
+    try:
+        path = _resolve_within_library(filename)
+    except ValueError:
+        return False
+    if not os.path.isfile(path):
+        return False
+
+    if path.lower().endswith(".txt"):
+        data = read_txt_prompt_data(path)
+        if data is None:
+            return False
+        _write_prompt_data_txt(path, data["prompt"], list(category or []))
+        return True
+
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+        rebuilt = _png_with_categories(raw, category)
+    except (OSError, ValueError) as exc:
+        log.debug("metadata-only rewrite unavailable for %s (%s)", filename, exc)
+        return False
+
+    tmp_path = path + f".tmp-{uuid_lib.uuid4().hex}"
+    try:
+        with open(tmp_path, "wb") as f:
+            f.write(rebuilt)
+        os.replace(tmp_path, path)
+    except OSError as exc:
+        log.warning("category rewrite failed for %s: %s", filename, exc)
+        return False
+    finally:
+        _remove_quietly(tmp_path)
+    _drop_prompt_read(path)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -968,8 +1145,8 @@ def _ingest_workflowless_png(path: str, name: str, category: list | None = None)
         size" kept once this runs)
       - a workflow embedding `name` as the prompt text is attached
         (prompt_data.prompt == prompt_data.name for this path, per the
-        documented "Naming" rule)
-      - `category` (round 13): tags to embed alongside -- scan_library
+        "Naming" rule above)
+      - `category`: tags to embed alongside -- scan_library
         passes the tags the file (or a deduped twin .txt, see
         _merge_txt_categories_into_png) already carries, so ingest
         never silently strips category information
@@ -987,8 +1164,36 @@ def _ingest_workflowless_png(path: str, name: str, category: list | None = None)
     _write_prompt_data_png(path, raw, workflow_json, category=category or None)
 
 
+def _retire_duplicate(path: str) -> None:
+    """Move a superseded prompt_data file into `library/_trash/` instead
+    of deleting it.
+
+    The duplicate rule (a .txt whose name+text matches a .png) is an
+    inference, and an inference that destroys a user file with no undo
+    is a bad trade -- especially since the only notice is a log line.
+    Retiring keeps the scan's outcome identical (the file leaves the
+    library folder, `_trash` is not scanned) while staying fully
+    recoverable: drag the file back out and rescan.
+
+    A name already present in `_trash` gets a numeric suffix rather than
+    overwriting the older casualty. Falls back to raising OSError (which
+    the caller already handles by keeping the file in the current scan)
+    if the move is impossible.
+    """
+    trash = _trash_dir()
+    os.makedirs(trash, exist_ok=True)
+    base = os.path.basename(path)
+    stem, ext = os.path.splitext(base)
+    target = os.path.join(trash, base)
+    n = 2
+    while os.path.exists(target):
+        target = os.path.join(trash, f"{stem}_{n:03d}{ext}")
+        n += 1
+    shutil.move(path, target)
+
+
 def _merge_txt_categories_into_png(png_path: str, png_data: dict, txt_data: dict) -> None:
-    """Round 13 (png-wins dedup): fold a losing duplicate .txt's
+    """PNG-wins dedup: fold a losing duplicate .txt's
     category tags into the surviving .png BEFORE the txt is deleted, so
     a user's tagging work is never silently destroyed. Case-insensitive
     union (the same matching rule _register_categories_from_scan uses).
@@ -1087,64 +1292,176 @@ def _make_user_prompt_workflow(prompt_text: str) -> dict:
 # Scan (the only place UID is assigned)
 # ---------------------------------------------------------------------------
 
-def scan_library() -> list:
-    """Scan LIBRARY_DIR for compatible prompt_data files, ingesting/
+def scan_library(normalize: bool = True) -> list:
+    """Scan the library folder -- AND every one of its subfolders, one
+    level deep -- for compatible prompt_data files, ingesting/
     normalizing not-yet-processed files on disk as needed, and return
     an alphabetically sorted list of resolved entries:
 
         [{"name", "uid", "prompt_ref", "prompt", "category", "filename",
-          "has_thumbnail"}, ...]
+          "has_thumbnail", "folder"}, ...]
 
-    Two prompt_data shapes are scanned -- a .png (has a thumbnail) and a
-    .txt (no thumbnail) -- and each is normalized in place, keeping its
-    own extension (a .txt is NEVER turned into a .png). Whole-folder
-    rule BEFORE any per-file work (round 13): a .txt whose name +
-    canonical prompt TEXT matches a .png in this scan is the duplicate
-    older shape of that prompt -- its tags are merged into the PNG, the
-    .txt file is deleted from disk, and only the PNG continues through
-    normalization (module docstring: "That shape rule also decides
-    duplicates"). And UID-bearing twins of the SAME shape are
-    reconciled too (round 14): "already normalized" requires the UID
-    to MATCH the content, so a hand-renamed copy of an existing prompt
-    -- valid-looking digits, wrong hash -- is demoted into the classic
-    suffix ladder below, while the content-consistent original keeps
-    its stem. Per file:
-      1. A .png with no embedded user_prompt workflow (read_prompt_data
-         returns prompt=None) is normalized in place via
-         _ingest_workflowless_png (name becomes the prompt too, image
-         bytes get cropped/resized to LIBRARY_THUMB_SIZE) -- but only
-         AFTER its final name is resolved under step 2, so the prompt
-         text reflects any collision suffix ("Beautiful_002", never
-         the pre-collision "Beautiful"). A .txt always carries its text,
-         so it never needs this step.
-      2. Any file without a UID in its filename (a freshly-dropped .png,
-         a bare .txt, or a .png dropped in already carrying a valid
-         workflow but no UID) -> the stem is normalized for storage
-         (spaces and illegal characters fold to "_"), a UID is
-         assigned, and the file is renamed to "<stem>_<UID><ext>" (its
-         original extension).
-         When an entry with the SAME name and SAME prompt text
-         already exists -- compared by canonical text, so files
-         carrying an older or hand-written UID are caught too -- the
-         unified collision suffix applies: the trailing number is
-         appended to the DISPLAY name ("Beautiful" -> "Beautiful_002"; a
-         name ending in "_" reuses it: "Bright_" -> "Bright_002"), which
-         encodes to "<stem>__002_<UID><ext>" (lowest available number, at
-         least three digits), and the UID is REGENERATED from that new
-         suffixed name, exactly as the editor would compute it for
-         "Beautiful_002".
+    SUBFOLDERS: the library root is scanned first, then every direct
+    subfolder in alphabetical order (a folder inside a folder is not
+    itself recursed into -- one level only), skipping any subfolder
+    whose name starts with "_" (the existing internal-bookkeeping
+    convention -- "_trash", the categories sidecar's own directory
+    concept -- extended to mean "not a browsable folder" generally).
+    `folder` on each entry is that subfolder's name, or "" for anything
+    at the library root.
 
-    Race-safety: if two scans run concurrently and both attempt to
-    rename the same un-UID'd file, the loser's os.replace() target will
-    already exist under the winner's chosen name (same hash, since UID
-    is deterministic from name+prompt) -- we tolerate that by checking
-    for the destination first and skipping the rename if it's already
-    been done, rather than erroring.
+    Each folder is scanned by _scan_one_folder() using EXACTLY the
+    single-folder algorithm this function has always run (collision
+    ladder, .txt/.png dedup, workflowless-PNG ingestion -- all
+    unchanged, all still scoped to files within that one folder only).
+    What's new is the MERGE across folders once every one of them has
+    been scanned independently:
+
+    Cross-folder identity collision rule: if two folders each contain a
+    prompt with the same identity (same Prompt Name, same canonical
+    prompt text -- the same rule _scan_one_folder already uses WITHIN
+    one folder), the file in whichever folder was scanned FIRST wins
+    that identity, and the matching file(s) in every later folder are
+    simply left out of the merged result entirely -- not renamed, not
+    retired to _trash, not touched on disk at all, since there is
+    nothing wrong with them; they are just shadowed by an
+    earlier-folder entry with identical content. A file that stops
+    being shadowed (the earlier copy is deleted, or edited so its
+    identity no longer matches) reappears on the very next scan with no
+    special handling needed, because the merge is recomputed fresh
+    every time from that scan's own results.
+
+    A prompt's `prompt_ref` never encodes which folder it lives in
+    (see parse_prompt_ref's own security note -- a ref containing a
+    path separator is deliberately treated as invalid, closing a path-
+    traversal hole) -- so moving a file between folders on disk, either
+    in-app or externally, changes only where resolve() finds it, never
+    what ref it resolves under, and every preset pointing at it keeps
+    working with no retargeting needed at all.
+
+    `normalize=False` is the strictly read-only mode _scan_one_folder
+    already documents, applied uniformly across every folder in this
+    same call: nothing is renamed, ingested, retired or registered
+    anywhere, and the returned entries describe what the FINAL names
+    WOULD be. Pure queries (check_already_exists) use that mode so a
+    "does this already exist?" probe can never mutate any folder as a
+    side effect.
+    """
+    with _SCAN_LOCK:
+        return _scan_library_locked(normalize)
+
+
+def _iter_library_folders():
+    """Yield (folder_abs, folder_rel) for the library root ("" ) first,
+    then every direct subfolder in alphabetical order -- one level deep
+    only; a folder's own subfolders are not walked. Any subfolder whose
+    name starts with "_" is skipped (the "_trash"/"_categories.json"
+    convention: an underscore-prefixed name is internal bookkeeping,
+    never a user-browsable folder), and anything that isn't actually a
+    directory (a stray file sitting next to the library root, say) is
+    silently skipped rather than erroring.
+
+    This is the ONE place "what counts as a library folder" is decided
+    -- scan_library, _library_signature, and anywhere else that needs
+    to walk the whole library all call this rather than each
+    re-implementing the same os.listdir + filter + sort.
+    """
+    root = _lib_dir()
+    yield root, ""
+    try:
+        names = sorted(os.listdir(root))
+    except FileNotFoundError:
+        return
+    for name in names:
+        if name.startswith("_"):
+            continue
+        abs_path = os.path.join(root, name)
+        if os.path.isdir(abs_path):
+            yield abs_path, name
+
+
+def _scan_library_locked(normalize: bool) -> list:
+    folders = list(_iter_library_folders())
+
+    # Scan every folder independently first -- each folder's OWN
+    # collision ladder/dedup only ever sees files within that folder,
+    # exactly as before subfolders existed (see _scan_one_folder).
+    per_folder_results = [
+        _scan_one_folder(folder_abs, folder_rel, normalize)
+        for folder_abs, folder_rel in folders
+    ]
+
+    # Cross-folder merge: first folder to claim an identity (Prompt
+    # Name case-folded + canonical prompt text -- the SAME rule
+    # _scan_one_folder uses internally) wins; every later folder's
+    # matching entry is left out of the merged list untouched on disk.
+    # `folders` is already root-first-then-alphabetical (see
+    # _iter_library_folders), so iterating per_folder_results in that
+    # same order is what makes "first" mean the root, then the
+    # alphabetically earliest subfolder, exactly as specified.
+    seen_identities = set()
+    results = []
+    ref_folder_index = {}
+    for folder_results in per_folder_results:
+        for entry in folder_results:
+            identity = (entry["name"].lower(), canonical_prompt_text(entry["prompt"] or ""))
+            if identity in seen_identities:
+                continue  # shadowed by an earlier folder's identical entry
+            seen_identities.add(identity)
+            # entry["filename"] is a BARE name at this point (see
+            # _scan_one_folder / read_prompt_data: os.path.basename(path)
+            # -- correct for that function's own folder-scoped view, but
+            # every consumer OUTSIDE this merge step (thumbnail serving,
+            # rename/delete, resolve()'s own fallback search) needs a
+            # path _resolve_within_library() can act on directly, which
+            # for anything not at the root means folder-QUALIFIED. This
+            # is the one place that qualification is added -- entries
+            # never carry a bare name once they leave this function.
+            # prompt_ref itself is NOT touched: it stays exactly
+            # "Name_UID" regardless of folder (parse_prompt_ref
+            # deliberately rejects a path separator in a ref -- see its
+            # own security note -- so the folder can never live there).
+            if entry["folder"]:
+                entry["filename"] = os.path.join(entry["folder"], entry["filename"])
+            results.append(entry)
+            ref_folder_index[entry["prompt_ref"]] = entry["folder"]
+
+    results.sort(key=lambda e: e["name"].lower())
+
+    if normalize:
+        _register_categories_from_scan(results)
+        # Rebuilt from THIS scan's merged results every time (never
+        # incrementally patched), so a file that moved, got shadowed,
+        # or stopped being shadowed is reflected exactly as the merge
+        # above just decided -- resolve() reads this to know which
+        # folder to look in without searching all of them.
+        _REF_FOLDER_INDEX.clear()
+        _REF_FOLDER_INDEX.update(ref_folder_index)
+
+    return results
+
+
+def _scan_one_folder(folder_abs: str, folder_rel: str, normalize: bool) -> list:
+    """Scan exactly ONE folder (no recursion of its own -- see
+    _scan_library_locked, which calls this once per folder and merges
+    the results) and return its entries, each carrying `"folder":
+    folder_rel` (the relative subfolder name, "" for the library root).
+
+    This is the untouched single-folder algorithm scan_library() has
+    always run -- collision ladder, .txt/.png dedup, workflowless-PNG
+    ingestion, all of it -- now parametrized on WHICH directory to walk
+    (folder_abs) instead of hardcoding the library root. Every path this
+    function reads or writes stays inside folder_abs; nothing here ever
+    reaches into a different folder, which is what makes "first folder
+    wins an identity, later folders are silently skipped" (see
+    _scan_library_locked) safe to implement as a merge step performed
+    AFTER all folders have been scanned independently, rather than
+    needing this function to know about any other folder while it runs.
     """
     results = []
 
     try:
-        filenames = sorted(os.listdir(LIBRARY_DIR))
+        filenames = sorted(os.listdir(folder_abs))
     except FileNotFoundError:
         return results
 
@@ -1168,7 +1485,7 @@ def scan_library() -> list:
     # carries its own extension so pass 2 renames it in kind.
     records = []
     for filename in candidate_filenames:
-        path = os.path.join(LIBRARY_DIR, filename)
+        path = os.path.join(folder_abs, filename)
         data = read_prompt_data_cached(path)
         if data is None:
             continue  # incompatible/unreadable/empty -- silently skipped
@@ -1189,7 +1506,7 @@ def scan_library() -> list:
         text = data["prompt"] if data["prompt"] is not None else display
         return (display.lower(), canonical_prompt_text(text))
 
-    # Pass 1.5 (round 13, user rule): a .txt whose IDENTITY -- same
+    # Pass 1.5: a .txt whose IDENTITY -- same
     # Prompt Name (case-folded) and same canonical prompt TEXT -- also
     # belongs to a .png in this same scan is a duplicate whose richer
     # twin is the PNG: the PNG keeps the entry (it carries everything
@@ -1216,28 +1533,30 @@ def scan_library() -> list:
                 survivors.append((filename, path, data, ext))
                 continue
             png_filename, png_path, png_data = twin
+            if not normalize:
+                continue  # read-only scan: the PNG owns the entry, txt just drops out
             _merge_txt_categories_into_png(png_path, png_data, data)
             try:
-                os.remove(path)
+                _retire_duplicate(path)
                 _drop_prompt_read(path)
                 taken.discard(filename.lower())
-                print(
-                    f"Prompt Composer: removed duplicate '{filename}' -- an "
-                    f"identical PNG ('{png_filename}', same name and prompt "
-                    f"text) owns the entry now"
+                log.info(
+                    "retired duplicate '%s' to %s -- an identical PNG ('%s', "
+                    "same name and prompt text) owns the entry now",
+                    filename, os.path.basename(_trash_dir()), png_filename,
                 )
             except OSError:
                 # Locked/in-use right now: keep this txt in the scan for
-                # this round; the classic collision-suffix path makes it
+                # this pass; the classic collision-suffix path makes it
                 # a visible "_002" sibling until a later scan deletes it.
                 survivors.append((filename, path, data, ext))
         records = survivors
 
-    # Pass 1.75 (round 14, user-caught ladder gap): pass 2 TRUSTS any
+    # Pass 1.75: pass 2 TRUSTS any
     # file whose filename already carries a UID and appends it untouched
     # -- so a COPY whose UID was hand-renamed into another valid-looking
-    # 8-digit number (Woman_19321688.png -> Woman_19321388.png) skipped
-    # the collision ladder entirely and showed as a second identical
+    # 8-digit number (Woman_19321688.png -> Woman_19321388.png) would skip
+    # the collision ladder entirely and show as a second identical
     # "Woman" card. "Already normalized" must mean UID-matches-CONTENT:
     # hash(name+text) is the invariant every normalization writes, so
     # among files sharing one identity the content-consistent file is
@@ -1294,10 +1613,16 @@ def scan_library() -> list:
             # that carries a UID still gets the bare-PNG ingest so it
             # has real prompt text (a .txt always has text already).
             if embedded is None and ext == ".png":
-                _ingest_workflowless_png(path, name, data.get("category"))
-                data = read_prompt_data_cached(path)
-                if data is None:
-                    continue  # ingestion failed unexpectedly -- skip defensively
+                if normalize:
+                    _ingest_workflowless_png(path, name, data.get("category"))
+                    data = read_prompt_data_cached(path)
+                    if data is None:
+                        continue  # ingestion failed unexpectedly -- skip defensively
+                else:
+                    # Read-only: report the text ingestion WOULD write
+                    # (a bare PNG's prompt is its own name) without
+                    # touching the file.
+                    data = {**data, "prompt": name}
             results.append({
                 "name": name,
                 "uid": uid,
@@ -1306,10 +1631,11 @@ def scan_library() -> list:
                 "category": data["category"],
                 "filename": filename,
                 "has_thumbnail": ext == ".png",
+                "folder": folder_rel,
             })
             continue
 
-        # Import normalization (Naming_Correction_Rules.md section 3):
+        # Import normalization:
         # spaces and illegal characters in the dropped filename fold
         # into "_" before the file is stored, and the Prompt Name is
         # whatever the corrected stem decodes to.
@@ -1359,23 +1685,25 @@ def scan_library() -> list:
         # Step 2 (bare PNG): normalize in place now that the final name
         # is known, so the embedded prompt text equals the final Prompt
         # Name -- then rename (step 3). A .txt already carries its text.
-        if embedded is None and ext == ".png":
+        if embedded is None and ext == ".png" and normalize:
             _ingest_workflowless_png(path, display, data.get("category"))
             if read_prompt_data_cached(path) is None:
                 continue  # ingestion itself failed unexpectedly -- skip defensively
 
-        new_path = os.path.join(LIBRARY_DIR, new_filename)
-        if not os.path.exists(new_path):
-            try:
-                os.replace(path, new_path)
-                # The file now lives under a different path key; drop the
-                # old one so nothing ever serves it from a dead name (the
-                # new path re-parses once, then caches under its real key).
-                _drop_prompt_read(path)
-            except OSError:
-                # Another process/thread may have just renamed it;
-                # fall through and use the computed name/uid anyway.
-                pass
+        if normalize:
+            new_path = os.path.join(folder_abs, new_filename)
+            if not os.path.exists(new_path):
+                try:
+                    os.replace(path, new_path)
+                    # The file now lives under a different path key; drop
+                    # the old one so nothing ever serves it from a dead
+                    # name (the new path re-parses once, then caches
+                    # under its real key).
+                    _drop_prompt_read(path)
+                except OSError:
+                    # Another process may have just renamed it; fall
+                    # through and use the computed name/uid anyway.
+                    pass
 
         data["filename"] = new_filename
         data["uid"] = uid
@@ -1394,10 +1722,10 @@ def scan_library() -> list:
             "category": data["category"],
             "filename": data["filename"],
             "has_thumbnail": ext == ".png",
+            "folder": folder_rel,
         })
 
     results.sort(key=lambda e: e["name"].lower())
-    _register_categories_from_scan(results)
     return results
 
 
@@ -1452,27 +1780,77 @@ def _register_categories_from_scan(results: list) -> None:
 _SCAN_MEMO_TTL_SECONDS = 10.0
 _scan_memo = {"sig": None, "expires": 0.0, "results": None}
 
+# Ref -> folder index, rebuilt every time scan_library() runs (see its
+# tail). "" means the library root; any other value is a subfolder name
+# relative to the root (only ONE level deep -- see _iter_library_folders).
+# resolve() consults this so it can go straight to the right subfolder
+# instead of searching every one of them on every call (resolve() runs
+# on every compose/preview, so it has to stay a single stat, not an
+# O(folders) directory walk). Entirely empty (and every lookup a miss)
+# when the library has no subfolders at all, which is what keeps
+# resolve() exactly as fast as before this feature existed for anyone
+# not using subfolders.
+_REF_FOLDER_INDEX: dict[str, str] = {}
+
+
+def library_signature() -> str:
+    """Public alias of _library_signature().
+
+    Used to invalidate the library BROWSER's own paged-scan cache (see
+    scan_library_page) -- NOT by PromptComposerNode.IS_CHANGED(), which
+    computes the node's actual composed output directly instead of
+    fingerprinting the library as a proxy for it (see IS_CHANGED()'s
+    own docstring in prompt_composer_node.py for why a library-wide,
+    byte-level signature was the wrong tool for that job).
+    """
+    return _library_signature()
+
 
 def _library_signature() -> str:
-    """Cheap content-independent fingerprint of the library folder:
-    sorted (filename, size, mtime_ns) over every prompt_data candidate,
-    hashed. Any add/remove/rename/rewrite -- in-app or from outside --
-    moves it; scanning the folder's STAT data costs a directory read
-    plus one stat per file, never an open."""
-    try:
-        filenames = os.listdir(LIBRARY_DIR)
-    except FileNotFoundError:
-        return "missing"
+    """Cheap content-independent fingerprint of the WHOLE library --
+    the root plus every subfolder _iter_library_folders() walks:
+    sorted (relative_name, size, mtime_ns) over every prompt_data
+    candidate in any of them, hashed. Any add/remove/rename/rewrite --
+    in-app or from outside, in the root OR any subfolder -- moves it;
+    scanning costs one directory read plus one stat per file, per
+    folder, never an open.
+
+    This is a broad, byte-level "has anything at all touched the
+    library" signal -- used to invalidate the PAGED SCAN CACHE
+    (scan_library_page's memo), which backs the library BROWSER UI and
+    genuinely needs to notice a thumbnail added/removed/replaced, a
+    rename, a category edit, or any other on-disk change, because the
+    browser displays all of that.
+
+    Also stats the SUBFOLDER LIST ITSELF (each entry as ("<dirlist>",
+    name)): adding or removing a subfolder changes nothing about any
+    individual file's own stat data, so without this a brand new empty
+    "Outfits/" folder (or one that was removed) would never move the
+    signature -- the memo would keep serving a scan from before that
+    folder existed until some unrelated file elsewhere happened to
+    change too.
+    """
     parts = []
-    for name in sorted(filenames):
-        if not name.lower().endswith((".png", ".txt")):
-            continue
+    try:
+        folders = list(_iter_library_folders())
+    except OSError:
+        return "missing"
+    for folder_abs, folder_rel in folders:
+        parts.append(("<dirlist>", folder_rel))
         try:
-            st = os.stat(os.path.join(LIBRARY_DIR, name))
-        except OSError:
-            parts.append((name, "gone"))
+            filenames = os.listdir(folder_abs)
+        except FileNotFoundError:
             continue
-        parts.append((name, st.st_size, st.st_mtime_ns))
+        for name in sorted(filenames):
+            if not name.lower().endswith((".png", ".txt")):
+                continue
+            rel_name = os.path.join(folder_rel, name) if folder_rel else name
+            try:
+                st = os.stat(os.path.join(folder_abs, name))
+            except OSError:
+                parts.append((rel_name, "gone"))
+                continue
+            parts.append((rel_name, st.st_size, st.st_mtime_ns))
     return hashlib.sha1(repr(parts).encode("utf-8")).hexdigest()
 
 
@@ -1482,8 +1860,9 @@ def clear_scan_caches() -> None:
     button's guarantee that whatever is on disk right now gets
     re-read, even a file replaced with byte-identical size and
     preserved mtime."""
-    _scan_memo.update({"sig": None, "expires": 0.0, "results": None})
-    _PROMPT_READ_CACHE.clear()
+    with _SCAN_LOCK:
+        _scan_memo.update({"sig": None, "expires": 0.0, "results": None})
+        _PROMPT_READ_CACHE.clear()
 
 
 def scan_library_page(page_size: int | None = None, cursor: int | None = None,
@@ -1513,13 +1892,15 @@ def scan_library_page(page_size: int | None = None, cursor: int | None = None,
         offset = 0
 
     now = time.time()
-    sig = _library_signature()
-    memo = _scan_memo
-    if memo["results"] is None or memo["sig"] != sig or now >= memo["expires"]:
-        results = scan_library()
-        memo.update({"sig": _library_signature(), "expires": now + _SCAN_MEMO_TTL_SECONDS,
-                     "results": results})
-    results = memo["results"]
+    with _SCAN_LOCK:
+        sig = _library_signature()
+        memo = _scan_memo
+        if memo["results"] is None or memo["sig"] != sig or now >= memo["expires"]:
+            results = scan_library()
+            memo.update({"sig": _library_signature(),
+                         "expires": now + _SCAN_MEMO_TTL_SECONDS,
+                         "results": results})
+        results = memo["results"]
 
     total = len(results)
     offset = min(offset, total)
@@ -1547,6 +1928,15 @@ def parse_prompt_ref(prompt_ref: str):
     name, uid = split_name_uid(prompt_ref)
     if uid is None:
         return None, None
+    # A ref's name half is always produced by encode_prompt_name(), which
+    # can emit neither a path separator nor "..". Anything that carries
+    # one is not a ref this library ever wrote -- it is an attempt to
+    # address a file outside the library folder (UID_RE's lazy ".*?"
+    # happily matches "../../etc/passwd"), so it resolves to nothing.
+    if os.sep in name or "/" in name or "\\" in name or os.path.isabs(name):
+        return None, None
+    if ".." in name.split("/") or ".." in name.split(os.sep) or name == "..":
+        return None, None
     return name, uid
 
 
@@ -1573,35 +1963,97 @@ def resolve(prompt_ref: str) -> dict | None:
     degradation, not a special case that needs handling here.
 
     This goes through read_prompt_data_cached(), so a repeated resolve
-    of an unchanged file costs a stat rather than a fresh PNG decode --
-    the "mtime-keyed cache, added transparently later" that this
-    function's shape originally reserved for the Roadmap's Phase 8 note
-    is that cache, now in place behind this same single entry point.
+    of an unchanged file costs a stat rather than a fresh PNG decode.
     """
     name, uid = parse_prompt_ref(prompt_ref)
     if name is None:
         return None
 
+    # Which folder currently holds this ref, per the most recent scan's
+    # merge (see _scan_library_locked's tail) -- "" for the library
+    # root, or a subfolder name. This is the ONLY candidate tried in the
+    # overwhelmingly common case (something the last scan already knows
+    # about), which is what keeps this a single stat per extension --
+    # resolve() runs on every compose/preview (and once per entry in a
+    # section's own entry list, which can be hundreds), so an
+    # unconditional directory walk here is not a cheap thing to get
+    # wrong: _iter_library_folders() itself does a real os.listdir(),
+    # and calling it on every resolve() regardless of whether the index
+    # already had the answer is exactly the kind of per-call cost that
+    # turns a 500-entry section heavy. The full "search every folder"
+    # fallback below is used ONLY when the index has nothing for this
+    # ref (before the very first scan has ever run) or when the indexed
+    # folder's own guess fails to actually contain the file (a stale
+    # index -- the file moved since the last scan, in-app or
+    # externally) -- both rare, unlike the lookup itself.
+    indexed_folder = _REF_FOLDER_INDEX.get(prompt_ref)
+    candidate_folders = [indexed_folder] if indexed_folder is not None else None
+
     # A prompt lives as a .png (with a thumbnail) or a .txt (without).
     # Try the PNG first -- it's the shape a prompt reaches once it has
     # any image -- then the .txt. The first that resolves wins.
-    for ext in (".png", ".txt"):
-        filename = f"{name}_{uid}{ext}"
-        path = os.path.join(LIBRARY_DIR, filename)
-        data = read_prompt_data_cached(path)
-        if data is None:
-            continue
-        return {
-            "name": data["name"],
-            "name_portion": data["name_portion"],
-            "uid": data["uid"] or uid,
-            "prompt_ref": prompt_ref,
-            "prompt": data["prompt"],
-            "category": data["category"],
-            "filename": data["filename"],
-            "has_thumbnail": data["has_thumbnail"],
-        }
-    return None
+    def _try_folders(folders):
+        for folder_rel in folders:
+            for ext in (".png", ".txt"):
+                filename = f"{name}_{uid}{ext}"
+                rel_path = os.path.join(folder_rel, filename) if folder_rel else filename
+                # Belt and braces next to parse_prompt_ref's own
+                # rejection: every path this module opens goes through
+                # the traversal guard, regardless of which folder it
+                # resolves into.
+                try:
+                    path = _resolve_within_library(rel_path)
+                except ValueError:
+                    return "invalid", None
+                data = read_prompt_data_cached(path)
+                if data is None:
+                    continue
+                return folder_rel, (rel_path, data)
+        return None, None
+
+    if candidate_folders is not None:
+        folder_rel, hit = _try_folders(candidate_folders)
+        if folder_rel == "invalid":
+            return None
+        if hit is not None:
+            rel_path, data = hit
+            return {
+                "name": data["name"],
+                "name_portion": data["name_portion"],
+                "uid": data["uid"] or uid,
+                "prompt_ref": prompt_ref,
+                "prompt": data["prompt"],
+                "category": data["category"],
+                "filename": rel_path,
+                "has_thumbnail": data["has_thumbnail"],
+                "folder": folder_rel,
+            }
+        # Indexed folder's guess didn't pan out (stale index) -- fall
+        # through to the full search below rather than reporting a
+        # false miss.
+
+    # Full fallback search: root first, then every subfolder
+    # alphabetically (the same order the merge itself uses) -- reached
+    # only when there was no indexed answer, or the indexed one was
+    # stale.
+    all_folders = [folder_rel for _folder_abs, folder_rel in _iter_library_folders()]
+    folder_rel, hit = _try_folders(all_folders)
+    if folder_rel == "invalid":
+        return None
+    if hit is None:
+        return None
+    rel_path, data = hit
+    return {
+        "name": data["name"],
+        "name_portion": data["name_portion"],
+        "uid": data["uid"] or uid,
+        "prompt_ref": prompt_ref,
+        "prompt": data["prompt"],
+        "category": data["category"],
+        "filename": rel_path,
+        "has_thumbnail": data["has_thumbnail"],
+        "folder": folder_rel,
+    }
 
 
 def resolve_many(prompt_refs: list) -> dict:
@@ -1622,7 +2074,8 @@ def resolve_many(prompt_refs: list) -> dict:
 # Library CRUD (create / edit / delete a prompt_data)
 # ---------------------------------------------------------------------------
 
-def check_already_exists(name: str, prompt: str, exclude_prompt_ref: str | None = None) -> dict | None:
+def check_already_exists(name: str, prompt: str, exclude_prompt_ref: str | None = None,
+                          entries: list | None = None) -> dict | None:
     """Check whether a prompt with this exact name + prompt text
     already exists in the library. Returns the existing entry dict if
     found, else None.
@@ -1633,8 +2086,7 @@ def check_already_exists(name: str, prompt: str, exclude_prompt_ref: str | None 
     The name is run through the same correction used when writing, so
     a name that hasn't really changed compares equal to what's already
     on disk, and it is matched case-insensitively -- names that differ
-    only by case are identical names (Naming_Correction_Rules.md rule
-    1.7), and the UID itself is hashed case-folded.
+    only by case are identical names, and the UID itself is hashed case-folded.
 
     Content identity is "same UID" -- which, because the UID is a
     deterministic hash of the canonicalized name+text, means identical
@@ -1642,12 +2094,22 @@ def check_already_exists(name: str, prompt: str, exclude_prompt_ref: str | None 
     stored UID predates the current hashing scheme (or was written by
     hand) is still recognized as the same prompt rather than silently
     duplicated.
+
+    SIDE-EFFECT-FREE: this is a pure query, so it scans with
+    `normalize=False`. A read-looking probe must not rename files,
+    re-encode PNGs or retire duplicates as a side effect of answering
+    "does this exist?" -- normalization is the job of the routes that
+    genuinely load or rescan the library.
+
+    `entries` (optional): a library listing already in hand. Pass it
+    when checking many candidates in a row (a batch import, a category
+    sweep) so the whole batch costs ONE scan instead of one per item.
     """
     name = correct_prompt_name(name)
     candidate_uid = generate_uid(name, prompt)
     name_key = name.lower()
     text_key = canonical_prompt_text(prompt)
-    for entry in scan_library():
+    for entry in (entries if entries is not None else scan_library(normalize=False)):
         if exclude_prompt_ref and entry["prompt_ref"] == exclude_prompt_ref:
             continue
         if entry["name"].lower() != name_key:
@@ -1678,7 +2140,8 @@ def _register_categories_if_new(category: list | None) -> None:
 
 
 def create_prompt_data(name: str, prompt: str, image_bytes: bytes | None = None,
-                        category: list | None = None) -> dict:
+                        category: list | None = None, entries: list | None = None,
+                        folder: str | None = None) -> dict:
     """Create a new prompt_data PNG in the library.
 
     `name` is raw editor input: it is corrected into a Prompt Name
@@ -1686,28 +2149,46 @@ def create_prompt_data(name: str, prompt: str, image_bytes: bytes | None = None,
     portion (encode_prompt_name). The entry's `name` is the corrected
     Prompt Name; `prompt_ref`/`filename` carry the encoded half.
 
-    Raises ValueError if a prompt with the same name+prompt already
-    exists (caller/route is expected to have already surfaced the
-    "already exists" dialog via check_already_exists(), but this is
-    re-checked here defensively before writing).
+    `folder`: an optional plain (unprefixed) subfolder name -- e.g.
+    "Outfits" -- to create the prompt directly inside, matching an
+    "assign to folder" choice made before the prompt existed yet (the
+    edit panel's "New Prompt" flow can pick a folder category up front,
+    same as any other category). None/"" means the library root, same
+    as always. The folder itself is NOT created here -- it must already
+    exist (see create_folder_category) -- so a bad/unknown folder
+    raises rather than silently minting a new directory from a typo.
+
+    Raises AlreadyExistsError (a ValueError) if a prompt with the same
+    name+prompt already exists (caller/route is expected to have already
+    surfaced the "already exists" dialog via check_already_exists(), but
+    this is re-checked here defensively before writing).
+
+    `entries`: an already-scanned library listing, forwarded to the
+    duplicate check. Creating N prompts in a row otherwise costs N full
+    library scans -- pass one snapshot and the batch costs one.
     """
     name = correct_prompt_name(name)
     if not prompt or not prompt.strip():
         raise ValueError("Prompt text is required")
 
-    existing = check_already_exists(name, prompt)
+    folder = (folder or "").strip()
+    if folder and folder.lower() not in {f.lower() for f in list_folder_names()}:
+        raise ValueError(f'Folder category "{folder}" does not exist')
+
+    existing = check_already_exists(name, prompt, entries=entries)
     if existing is not None:
-        raise ValueError("This prompt already exists")
+        raise AlreadyExistsError("This prompt already exists")
 
     uid = generate_uid(name, prompt)
     encoded_name = encode_prompt_name(name)
     has_thumbnail = image_bytes is not None
     ext = ".png" if has_thumbnail else ".txt"
-    filename = f"{encoded_name}_{uid}{ext}"
+    bare_filename = f"{encoded_name}_{uid}{ext}"
+    filename = os.path.join(folder, bare_filename) if folder else bare_filename
     path = _resolve_within_library(filename)
 
     if os.path.exists(path):
-        raise ValueError("This prompt already exists")
+        raise AlreadyExistsError("This prompt already exists")
 
     if has_thumbnail:
         workflow_json = _make_user_prompt_workflow(prompt)
@@ -1725,12 +2206,13 @@ def create_prompt_data(name: str, prompt: str, image_bytes: bytes | None = None,
         "category": list(category or []),
         "filename": filename,
         "has_thumbnail": has_thumbnail,
+        "folder": folder,
     }
 
 
 def update_prompt_data(prompt_ref: str, name: str | None = None, prompt: str | None = None,
                         image_bytes: bytes | None = None, clear_image: bool = False,
-                        category: list | None = None) -> dict:
+                        category: list | None = None, folder=_UNSET) -> dict:
     """Edit an existing prompt_data in place. Any of name/prompt/image/
     category may be omitted to leave that field unchanged. A supplied
     `name` is raw editor input: it is corrected into a Prompt Name and
@@ -1742,6 +2224,16 @@ def update_prompt_data(prompt_ref: str, name: str | None = None, prompt: str | N
     kept byte-for-byte, so a prompt-only edit never rewrites the name
     half of the ref beyond what the UID change already forces.
 
+    `folder`: an explicit MOVE to a different library subfolder (a
+    plain, unprefixed name, e.g. "Outfits"; "" moves it to the library
+    root). Left at its default (_UNSET, an edit-not-a-move) the prompt
+    stays exactly wherever it already lives, same as before this
+    parameter existed. Raises ValueError if the target folder doesn't
+    exist (see create_folder_category -- the edit panel always creates
+    the folder up front, via "Add category", before anyone can pick it
+    here) or is not different for the same-value no-op cost of one
+    stat.
+
     Raises ValueError if the resulting name+prompt would collide with a
     DIFFERENT existing prompt_data, or if the source prompt_ref doesn't
     resolve to an existing file.
@@ -1749,6 +2241,26 @@ def update_prompt_data(prompt_ref: str, name: str | None = None, prompt: str | N
     current = resolve(prompt_ref)
     if current is None:
         raise ValueError("Prompt not found")
+
+    moving_folder = folder is not _UNSET and (folder or "") != (current.get("folder") or "")
+    if folder is not _UNSET:
+        target_folder = (folder or "").strip()
+        if target_folder and target_folder.lower() not in {f.lower() for f in list_folder_names()}:
+            raise ValueError(f'Folder category "{target_folder}" does not exist')
+    else:
+        target_folder = current.get("folder") or ""
+
+    # Category-only edit: tags are not part of the UID, so nothing can
+    # move (from a name/prompt/UID standpoint) and nothing needs
+    # re-encoding. This fast path also covers a pure folder MOVE with
+    # no other field touched: same file bytes, same filename stem, just
+    # relocated to a different directory.
+    if (name is None and prompt is None and image_bytes is None
+            and not clear_image and not moving_folder and category is not None):
+        tags = list(category or [])
+        if _rewrite_embedded_categories(current["filename"], tags):
+            _register_categories_if_new(tags)
+            return {**current, "category": tags}
 
     if name is not None:
         new_name = correct_prompt_name(name)
@@ -1764,11 +2276,10 @@ def update_prompt_data(prompt_ref: str, name: str | None = None, prompt: str | N
 
     collision = check_already_exists(new_name, new_prompt, exclude_prompt_ref=prompt_ref)
     if collision is not None:
-        raise ValueError("This prompt already exists")
+        raise AlreadyExistsError("This prompt already exists")
 
     old_path = _resolve_within_library(current["filename"])
     new_uid = generate_uid(new_name, new_prompt)
-
     # Whether the saved prompt has a thumbnail decides its whole on-disk
     # shape (PNG vs TXT) and so its extension:
     #   * a fresh image (image_bytes)  -> PNG
@@ -1795,7 +2306,17 @@ def update_prompt_data(prompt_ref: str, name: str | None = None, prompt: str | N
             base_image_bytes = None
 
     ext = ".png" if has_thumbnail else ".txt"
-    new_filename = f"{encoded_name}_{new_uid}{ext}"
+    # A name/prompt edit changes the UID (and so the filename) but, on
+    # its own, must never change which folder the entry lives in -- an
+    # edit is not implicitly a move. target_folder is current["folder"]
+    # unchanged UNLESS the caller explicitly passed a different
+    # `folder` above, which is what lets a genuine move ride the same
+    # write this function already does for a name/prompt/category edit
+    # rather than needing its own separate file-shuffling path.
+    bare_new_filename = f"{encoded_name}_{new_uid}{ext}"
+    new_filename = (
+        os.path.join(target_folder, bare_new_filename) if target_folder else bare_new_filename
+    )
     new_path = _resolve_within_library(new_filename)
 
     if has_thumbnail:
@@ -1808,9 +2329,11 @@ def update_prompt_data(prompt_ref: str, name: str | None = None, prompt: str | N
     # normcase, not plain !=: on Windows a case-only rename lands on the
     # SAME file, so removing "old_path" after writing "new_path" would
     # delete the prompt we just saved. Names differing only by case are
-    # the same name anyway (Naming_Correction_Rules.md rule 1.7). This
+    # the same name anyway. This
     # also removes the OTHER extension on a PNG<->TXT switch (a thumbnail
-    # added to a .txt, or removed from a .png).
+    # added to a .txt, or removed from a .png), AND the old copy left
+    # behind by a folder move (old_path and new_path now differ by
+    # directory as well as, potentially, nothing else).
     if os.path.normcase(new_path) != os.path.normcase(old_path) and os.path.isfile(old_path):
         os.remove(old_path)
         _drop_prompt_read(old_path)
@@ -1824,6 +2347,7 @@ def update_prompt_data(prompt_ref: str, name: str | None = None, prompt: str | N
         "category": list(new_category or []),
         "filename": new_filename,
         "has_thumbnail": has_thumbnail,
+        "folder": target_folder,
     }
 
 
@@ -1843,8 +2367,22 @@ def delete_prompt_data(prompt_ref: str) -> bool:
 
 def set_category(prompt_ref: str, category: list) -> dict:
     """Set (replace) the embedded category tags for an existing
-    prompt_data without touching its name/prompt/thumbnail."""
-    return update_prompt_data(prompt_ref, category=list(category or []))
+    prompt_data without touching its name/prompt/thumbnail.
+
+    Tags do not feed the UID (which is hash(name+text)), so this can
+    never move the ref -- which means it needs none of
+    update_prompt_data()'s machinery: no collision check (and so no
+    library scan), and no PNG re-encode. The tags are spliced straight
+    into the file's metadata (see _rewrite_embedded_categories); the
+    full path is kept only as a fallback for a file that cannot be
+    rewritten that way.
+    """
+    tags = list(category or [])
+    current = resolve(prompt_ref)
+    if current is not None and _rewrite_embedded_categories(current["filename"], tags):
+        _register_categories_if_new(tags)
+        return {**current, "category": tags}
+    return update_prompt_data(prompt_ref, category=tags)
 
 
 # ---------------------------------------------------------------------------
@@ -1861,10 +2399,10 @@ def _read_categories_index() -> dict:
     re-adding categories or re-scanning embedded tags (see
     rebuild_categories_index_from_library).
     """
-    if not os.path.isfile(CATEGORIES_INDEX_PATH):
+    if not os.path.isfile(_categories_index_path()):
         return {}
     try:
-        with open(CATEGORIES_INDEX_PATH, "r", encoding="utf-8") as f:
+        with open(_categories_index_path(), "r", encoding="utf-8") as f:
             data = json.load(f)
         if isinstance(data, dict):
             return data
@@ -1874,10 +2412,14 @@ def _read_categories_index() -> dict:
 
 
 def _write_categories_index(index: dict) -> None:
-    tmp_path = CATEGORIES_INDEX_PATH + f".tmp-{uuid_lib.uuid4().hex}"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(index, f, ensure_ascii=False, indent=2)
-    os.replace(tmp_path, CATEGORIES_INDEX_PATH)
+    target = _categories_index_path()
+    tmp_path = target + f".tmp-{uuid_lib.uuid4().hex}"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(index, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, target)
+    finally:
+        _remove_quietly(tmp_path)
 
 
 # The built-in category every library is guaranteed to have. Prompts are
@@ -1897,6 +2439,134 @@ def is_favorite_name(name) -> bool:
     return (name or "").strip().lower() == FAVORITE_CATEGORY.lower()
 
 
+# Marker prefix for a FOLDER-derived pseudo-category (see
+# folder_pseudo_category_name / is_folder_pseudo_category below). The
+# leading folder emoji + space is deliberately something a normal
+# category-name text field would never produce by accident, and
+# create_category/rename_category actively REJECT any real category
+# name starting with it (is_reserved_category_name) -- so a user cannot
+# spoof, rename into, or otherwise manufacture a category that collides
+# with or impersonates a folder-derived one. This is the same "one name
+# is protected and un-typeable-by-coincidence" shape as FAVORITE_CATEGORY,
+# just enforced by prefix-rejection rather than by name equality, since
+# there can be many distinct folder pseudo-categories (one per subfolder)
+# rather than exactly one.
+FOLDER_CATEGORY_PREFIX = "\U0001F4C1 "  # "📁 "
+
+
+def folder_pseudo_category_name(folder: str) -> str:
+    """The display name for a subfolder's pseudo-category, e.g.
+    "Outfits" -> "📁 Outfits". `folder` is the plain subfolder name as
+    scan_library() records it (see _iter_library_folders) -- never the
+    library root ("" has no pseudo-category at all; see
+    list_categories_with_folders)."""
+    return f"{FOLDER_CATEGORY_PREFIX}{folder}"
+
+
+def is_reserved_category_name(name) -> bool:
+    """True for any name a user must be BLOCKED from creating/renaming
+    into -- currently just the folder-pseudo-category marker prefix.
+    Checked by create_category and rename_category so the reservation
+    is enforced at the one place names are ever accepted from the
+    person, not left as a UI-only convention someone could bypass by
+    calling the route directly."""
+    return (name or "").startswith(FOLDER_CATEGORY_PREFIX)
+
+
+def folder_name_from_pseudo_category(pseudo_category: str) -> str:
+    """Inverse of folder_pseudo_category_name(): "📁 Outfits" -> "Outfits".
+    Raises ValueError if `pseudo_category` doesn't actually carry the
+    reserved marker -- callers should have already checked
+    is_reserved_category_name() (or equivalently the "📁 " prefix)
+    before calling this."""
+    if not is_reserved_category_name(pseudo_category):
+        raise ValueError("Not a folder-derived pseudo-category")
+    return pseudo_category[len(FOLDER_CATEGORY_PREFIX):].strip()
+
+
+_INVALID_FOLDER_CHARS = re.compile(r'[\\/:*?"<>|]')
+
+
+def _sanitize_folder_name(name: str) -> str:
+    """Validate a plain (unprefixed) folder name the same way a prompt
+    name is protected from becoming a bad path segment: no path
+    separators or other characters a filesystem would choke on, no
+    leading "_" (that convention is reserved for internal bookkeeping
+    folders like "_trash" -- see _iter_library_folders), and no
+    leading/trailing whitespace. Returns the trimmed name; raises
+    ValueError on anything invalid."""
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("Folder name is required")
+    if _INVALID_FOLDER_CHARS.search(name):
+        raise ValueError('Folder name cannot contain \\ / : * ? " < > |')
+    if name.startswith("_"):
+        raise ValueError('Folder name cannot start with "_"')
+    if name in (".", ".."):
+        raise ValueError("Invalid folder name")
+    return name
+
+
+def list_folder_names() -> list:
+    """Plain (unprefixed) subfolder names currently on disk, one level
+    deep, alphabetical -- the same set _iter_library_folders walks,
+    without the library root. Used to validate a folder-category
+    create/rename against what's already there."""
+    return [folder_rel for _abs, folder_rel in _iter_library_folders() if folder_rel]
+
+
+def create_folder_category(pseudo_category: str) -> str:
+    """Create a new folder-derived pseudo-category: makes an actual
+    subfolder on disk under the library root. `pseudo_category` is the
+    full "📁 Name" form (as typed into the "Add category" field, which
+    is where this is reached from -- see is_reserved_category_name's
+    own docstring for why that marker is otherwise rejected). Returns
+    the pseudo-category name. No-op (returns the existing name) if the
+    folder already exists, matched case-insensitively -- same
+    idempotent shape as create_category.
+    """
+    folder = _sanitize_folder_name(folder_name_from_pseudo_category(pseudo_category))
+    existing = next((f for f in list_folder_names() if f.lower() == folder.lower()), None)
+    if existing is not None:
+        return folder_pseudo_category_name(existing)
+    os.makedirs(_resolve_within_library(folder), exist_ok=True)
+    clear_scan_caches()
+    return folder_pseudo_category_name(folder)
+
+
+def rename_folder_category(old_pseudo_category: str, new_pseudo_category: str) -> str:
+    """Rename a folder-derived pseudo-category: renames the actual
+    subfolder on disk, carrying every prompt inside it along for free
+    (a directory rename, not a per-file move). Raises ValueError if the
+    old folder doesn't exist, the new name is invalid, or a DIFFERENT
+    folder already has that name (case-insensitively). Returns the new
+    pseudo-category name.
+    """
+    old_folder = folder_name_from_pseudo_category(old_pseudo_category)
+    new_folder = _sanitize_folder_name(folder_name_from_pseudo_category(new_pseudo_category))
+
+    folders = list_folder_names()
+    actual_old = next((f for f in folders if f.lower() == old_folder.lower()), None)
+    if actual_old is None:
+        raise ValueError("Folder category not found")
+
+    collision = next(
+        (f for f in folders if f.lower() == new_folder.lower() and f != actual_old), None
+    )
+    if collision is not None:
+        raise ValueError("A folder category with that name already exists")
+
+    old_path = _resolve_within_library(actual_old)
+    new_path = _resolve_within_library(new_folder)
+    # os.rename handles a case-only rename fine on its own; the
+    # collision check above only needs to exclude `actual_old` itself
+    # so renaming "Outfits" -> "outfits" isn't rejected as a collision
+    # with itself.
+    os.rename(old_path, new_path)
+    clear_scan_caches()
+    return folder_pseudo_category_name(new_folder)
+
+
 def _ensure_categories_index() -> dict:
     """Guarantee the library folder and its category sidecar exist, and
     that "Favorite" is in the sidecar.
@@ -1910,7 +2580,7 @@ def _ensure_categories_index() -> dict:
 
     Returns the index dict.
     """
-    os.makedirs(LIBRARY_DIR, exist_ok=True)
+    os.makedirs(_lib_dir(), exist_ok=True)
     index = _read_categories_index()
     if not any(is_favorite_name(existing) for existing in index):
         index[FAVORITE_CATEGORY] = {}
@@ -1926,6 +2596,13 @@ def list_categories() -> list:
     exist here with zero prompts currently tagged (freshly created, or
     all its prompts were untagged/deleted), which is what lets "Hide
     Empty" mean something.
+
+    Deliberately EXCLUDES folder-derived pseudo-categories (see
+    list_categories_with_folders): this is the list the "edit prompt"
+    panel's tag picker uses, and a folder isn't something a prompt is
+    individually tagged into -- it's just wherever the file happens to
+    live on disk, entirely un-embedded (see scan_library's `folder`
+    field) -- so it has no business appearing as an assignable tag.
     """
     names = sorted(_ensure_categories_index().keys(), key=lambda s: s.lower())
     favorite = next((n for n in names if is_favorite_name(n)), None)
@@ -1934,15 +2611,56 @@ def list_categories() -> list:
     return [favorite] + [n for n in names if n != favorite]
 
 
+def list_categories_with_folders() -> list:
+    """list_categories()'s result, with one FOLDER-derived pseudo-
+    category appended per subfolder currently seen in the library --
+    for the search toolbar's category dropdown, NOT the edit panel's
+    tag picker (which stays on plain list_categories(); see its own
+    docstring for why).
+
+    Each pseudo-category is named via folder_pseudo_category_name(),
+    e.g. "📁 Outfits" for a subfolder named "Outfits" -- the reserved
+    "📁 " marker (see FOLDER_CATEGORY_PREFIX) is what lets the frontend
+    tell a real, taggable category apart from "this is just where the
+    file lives", and is_reserved_category_name() is what stops a user
+    from typing that same marker into a real category name and
+    spoofing one.
+
+    Every subfolder _iter_library_folders() finds is listed here, EVEN
+    ONE WITH NO PROMPTS IN IT -- an empty folder category is still a
+    valid, pickable destination (the edit panel's folder picker is what
+    lets someone assign the very first prompt to a brand-new folder),
+    so this can't be derived purely from scanned entries' `folder`
+    field; that would miss exactly the folders nobody has filed anything
+    into yet.
+
+    Sorted alphabetically by folder name and placed AFTER every real
+    category (favorite-pinned list first, then folders) -- real,
+    user-managed categories are the primary organizational tool; the
+    folder view is a secondary, read-only convenience layered on top.
+    """
+    real = list_categories()
+    return real + [folder_pseudo_category_name(f) for f in list_folder_names()]
+
+
 def create_category(name: str) -> str:
     """Register a new category name in the index. No-op (returns the
     existing name) if it already exists case-insensitively. Does not
     tag any prompt -- creating a category and assigning it to a prompt
     are separate actions (see set_category / update_prompt_data).
+
+    A name carrying the reserved "📁 " marker (FOLDER_CATEGORY_PREFIX)
+    is NOT rejected here -- it is the one deliberate way to create a
+    real, on-disk library subfolder from the "Add category" UI (see
+    create_folder_category). Only a caller creating a genuinely ordinary
+    category is blocked from smuggling that prefix in (the folder path
+    is a distinct write: a directory, not a sidecar-index entry).
     """
     name = (name or "").strip()
     if not name:
         raise ValueError("Category name is required")
+    if is_reserved_category_name(name):
+        return create_folder_category(name)
 
     index = _read_categories_index()
     for existing in index:
@@ -1960,11 +2678,29 @@ def rename_category(old_name: str, new_name: str) -> str:
     that currently carry the old name.
     Raises ValueError if old_name doesn't exist or new_name collides
     (case-insensitively) with a different existing category.
+
+    If `old_name` is itself a folder-derived pseudo-category (the
+    "📁 " marker), this is a folder rename instead -- see
+    rename_folder_category -- since a folder's identity IS its
+    on-disk directory name, not a sidecar-index row.
     """
     old_name = (old_name or "").strip()
     new_name = (new_name or "").strip()
     if not new_name:
         raise ValueError("New category name is required")
+    if is_reserved_category_name(old_name):
+        # A folder category's renamed name must keep the same marker
+        # (it's still a folder, just under a new name) -- callers
+        # (the edit panel's rename toolbar) always resupply the "📁 "
+        # prefix themselves, but tolerate it being left off here too
+        # rather than erroring on what is clearly the intended folder.
+        new_folder_name = new_name if is_reserved_category_name(new_name) else folder_pseudo_category_name(new_name)
+        return rename_folder_category(old_name, new_folder_name)
+    if is_reserved_category_name(new_name):
+        raise ValueError(
+            f'Category names cannot start with "{FOLDER_CATEGORY_PREFIX.strip()}" '
+            "-- that prefix is reserved for folder-based categories"
+        )
 
     index = _read_categories_index()
     actual_old = next((k for k in index if k.lower() == old_name.lower()), None)
@@ -1978,11 +2714,15 @@ def rename_category(old_name: str, new_name: str) -> str:
         raise ValueError("A category with that name already exists")
 
     # Update every prompt_data (PNG or .txt) that currently carries the
-    # old tag.
+    # old tag. ONE scan for the whole sweep (the old code re-scanned the
+    # entire library per tagged prompt, via update_prompt_data's
+    # collision check), and each file gets a metadata-only rewrite
+    # rather than a full re-encode.
     for entry in scan_library():
         if actual_old in (entry.get("category") or []):
             new_tags = [new_name if c == actual_old else c for c in entry["category"]]
-            update_prompt_data(entry["prompt_ref"], category=new_tags)
+            if not _rewrite_embedded_categories(entry["filename"], new_tags):
+                update_prompt_data(entry["prompt_ref"], category=new_tags)
 
     # Re-read instead of committing the snapshot taken above: that walk
     # called scan_library() (which registers every tag it sees) and
@@ -2015,10 +2755,12 @@ def delete_category(name: str) -> bool:
     if actual is None:
         return False
 
+    # Same single-scan + metadata-only rewrite as rename_category.
     for entry in scan_library():
         if actual in (entry.get("category") or []):
             new_tags = [c for c in entry["category"] if c != actual]
-            update_prompt_data(entry["prompt_ref"], category=new_tags)
+            if not _rewrite_embedded_categories(entry["filename"], new_tags):
+                update_prompt_data(entry["prompt_ref"], category=new_tags)
 
     # Same re-read rationale as rename_category: the walk above can have
     # registered new names into the index on disk, and committing the
@@ -2054,10 +2796,10 @@ def rebuild_categories_index_from_library() -> list:
     return list_categories()
 
 
-# Bootstrap on import. ComfyUI imports this module (via server.routes,
-# reached from the node package's __init__) before any of the node's
-# routes can be called, so "the node entered the workflow" can never see
-# a half-set-up library: the folder exists and `_categories.json` is
-# inside it with "Favorite" already registered. Re-checked on every read
-# as well (see list_categories), since the folder is user-editable data.
-_ensure_categories_index()
+# NO bootstrap on import (see paths.py and _lib_dir): importing this
+# module must never touch the filesystem, so tests/tooling can import it
+# freely and so the data directory is only created once it is genuinely
+# needed. The invariant the old import-time call protected --
+# "`library/` exists and `_categories.json` has Favorite in it by the
+# time anything reads a category" -- is preserved by
+# _ensure_categories_index(), which every read path already calls.
