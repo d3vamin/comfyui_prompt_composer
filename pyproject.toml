@@ -6,8 +6,10 @@ license = { file = "LICENSE" }
 
 [project.urls]
 Repository = "https://github.com/d3vamin/comfyui_prompt_composer"
+"Bug Tracker" = "https://github.com/d3vamin/comfyui_prompt_composer/issues"
 
 [tool.comfy]
 PublisherId = "devamin"
 DisplayName = "Prompt Composer"
 Icon = ""
+Banner = "https://raw.githubusercontent.com/d3vamin/comfyui_prompt_composer/main/assets/images/pc_banner_v001.png"
