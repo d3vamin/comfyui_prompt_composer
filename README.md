@@ -16,7 +16,8 @@ Build complex prompts from reusable pieces instead of rewriting them every time.
 - **Reuse your library:** Keep prompt snippets in portable files and organize them with folders, categories, and favorites.
 - **Control randomization:** Randomize selected sections while keeping other sections fixed. Use seeds to reproduce a composition.
 - **Preview before generating:** Inspect the composed prompt and understand which parts contribute to it.
-- **Save compositions:** Reuse presets and save workflows with a snapshot of the composition.
+- **Save portable workflows:** Store the prompt entries used by a composition inside the workflow, so the composition can be recovered even when the original prompt library is unavailable.
+- **Keep prompts visible without the node:** Preserve the final output prompt in the saved workflow as a text widget, so the prompt remains readable in ComfyUI even when Prompt Composer is not installed.
 
 ## Why Prompt Composer?
 
@@ -137,7 +138,26 @@ Keep useful arrangements so you can return to them later.
 
 ![Prompt Composer presets](assets/images/pc_preset_001.png)
 
-### 6. Organize Large Libraries
+### 6. Workflow Portability and Prompt Recovery
+
+Prompt Composer helps preserve the prompt composition used to create a workflow, rather than depending entirely on the prompt library that was available when the workflow was saved.
+
+Since ComfyUI also embeds workflow information in generated PNG images, your generated images can serve as a way back to the workflows that created them. When you return to an older image in your collection, simply drag its PNG file onto the ComfyUI canvas to load the embedded workflow and revisit how that image was made.
+
+Prompt Composer extends this experience by helping preserve the original prompt composition:
+
+- **Keep used entries inside the workflow:** When you save a workflow containing Prompt Composer, the entries used to build the final output prompt are stored with the workflow.
+- **Recover entries when library files are unavailable:** If the original prompt files are no longer available on disk, the saved workflow can display the stored entries as workflow entry cards.
+- **Restore entries to your prompt library:** These workflow entry cards do not contain the original thumbnail images. Use the workflow indicator on a card to create a text-file version of that entry in your prompt library.
+- **Keep the final prompt readable without Prompt Composer:** The saved workflow also preserves the final output prompt as a text widget. This allows you to inspect and reuse the prompt in the ComfyUI workflow even if Prompt Composer is not installed or available.
+
+Together, these features help preserve more than just the generated image. The generated PNG can retain the embedded ComfyUI workflow, the workflow carries the prompt entries used in the composition, and the fallback text widget keeps the final prompt accessible even without Prompt Composer.
+
+This is especially useful when revisiting older generations: you can recover the workflow, inspect the original prompt, restore missing library entries, and continue working from where you left off.
+
+![Workflow entry recovery](assets/images/pc_workflow_entry_recovery_001.png)
+
+### 7. Organize Large Libraries
 
 Keep growing collections manageable.
 
@@ -149,7 +169,7 @@ Keep growing collections manageable.
 ![Library organization and search](assets/images/pc_category_001.png)
 ![Library organization and search](assets/images/pc_library_001.png)
 
-### 7. Track What Actually Ran
+### 8. Track What Actually Ran
 
 Prompt Composer includes indicators to help distinguish the composition used in the previous run from edits made afterward. Seed-related status indicators help you understand and restore the seed used for the previous execution.
 
